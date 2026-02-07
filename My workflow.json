@@ -1,0 +1,134 @@
+{
+  "name": "My workflow",
+  "nodes": [
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "=Jsi expert na nemovitostní právo a investiční analytik specializovaný na český trh s pozemky. Tvým úkolem je provést hloubkovou extrakci dat z inzerátu a veřejných registrů a připravit podklady pro investiční rating.\n\nVSTUPNÍ DATA\nID Inzerátu: {{ $json.hash_id }}\n\nURL Sreality: {{ $json.url_sreality }}\n\nGPS ArcGIS: {{ $json.gps_arcgis }}\n\nLokalita z inzerátu: {{ $json.lokalita_inzerat }}\n\nCena z inzerátu: {{ $json.cena_inzerat }} Kč\n\n══════════════════════════════════════════════════════════════════\n\nINSTRUKCE PRO ZPRACOVÁNÍ (LOGICKÝ PRŮCHOD)\n══════════════════════════════════════════════════════════════════\n\nKROK 1: IDENTIFIKACE PARCEL (Sreality Mining)\nZískej z URL Sreality: Výměru v m², typ pozemku (stavební, orná půda, atd.).\n\nHloubkový mining v textu: Identifikuj VŠECHNA parcelní čísla (např. p.č. 123/1) a čísla Listů vlastnictví (LV).\n\nZÁKLADNÍ PRAVIDLO: Pokud inzerát obsahuje více parcel, musíš pro KAŽDOU parcelu vytvořit samostatný objekt (řádek) ve výstupu. Neřeš duplicity v rámci inzerátu, ale extrahuj detail pro každý prvek zvlášť.\n\nKROK 2: PRÁVNÍ A TECHNICKÝ AUDIT (RÚIAN & KN)\nPro každou identifikovanou parcelu zjisti (nebo vyvoď z dostupných dat):\n\nKatastrální území (KÚ): Název a Kód KÚ (využij vdp.cuzk.gov.cz).\n\nPrávní vady (KO Faktory): Hledej v textu zmínky o exekuci, insolvenci nebo věcných břemenech (např. \"chůze a jízdy\").\n\nZasíťování (TEA Atributy): Z Registru RÚIAN zjisti technickoekonomické atributy staveb na pozemku nebo zmínky v textu o připojení (Plyn, Kanalizace, Vodovodní řad).\n\nKROK 3: BONITA PŮDY A OCHRANA ZPF (BPEJ)\nVolej/analyzuj eKatalog BPEJ (bpej.vumop.cz) a dekóduj 5místný kód:\n\nTřída ochrany ZPF: I-V (Kritické pro šanci na zastavění: I-II = téměř nezastavitelné, IV-V = ideální pro development).\n\nBodová výnosnost: 6–100 (produkční schopnost půdy).\n\nSklonitost: Z 4. číslice kódu (0 = rovina, 5+ = svah, riziko eroze).\n\nKROK 4: RIZIKA A LIMITY (Floods & AOPK)\nPovodňové riziko (ČAP): Urči zónu 1 (bezpečí) až 4 (nepojistitelné, nezastavitelné).\n\nOchrana přírody (AOPK): Zjisti průnik s CHKO, NP, Natura 2000 nebo biocentry (ÚSES).\n\nTechnické mapy (DTM): Ověř existenci dopravní a technické infrastruktury (přes dmvs.cuzk.gov.cz).\n\n══════════════════════════════════════════════════════════════════\n\nVÝPOČET INVESTIČNÍHO RATINGU (Metodika)\nKe každé parcele přiřaď skóre 0–100 bodů na základě těchto vah:\n\nSoulad s ÚP (35 %): Stavební = 100, Rezerva/Návrh = 50, Nezastavitelné = 0.\n\nZasíťování (20 %): Kompletní sítě = 100, Možnost napojení = 50, Bez sítí = 0.\n\nBonita/ZPF (15 %): Třída IV-V = 100, III = 50, I-II = 0.\n\nEnvironmentální rizika (20 %): Povodňová zóna 1 + mimo CHKO = 100, Zóna 4 = 0.\n\nCenová výhodnost (10 %): Srovnání nabídkové ceny s průměrem v KÚ.\n\n══════════════════════════════════════════════════════════════════\n\nPOŽADOVANÝ VÝSTUP (Plochý JSON pro Sheets)\n══════════════════════════════════════════════════════════════════ Výstupem musí být POLE objektů (Array of Objects), kde každý objekt představuje jednu parcelu.",
+        "options": {
+          "systemMessage": "Jsi datový agent pro analýzu českých pozemků.\n\n╔══════════════════════════════════════════════════════════════════════════╗\n║  🔴 KRITICKÉ PRAVIDLO: PARCELY POUZE Z INZERÁTU!                        ║\n║                                                                          ║\n║  GPS slouží POUZE k identifikaci katastrálního území a BPEJ.            ║\n║  NIKDY nestahuj všechny parcely v okolí GPS!                            ║\n║                                                                          ║\n║  Parcely a LV extrahuj VÝHRADNĚ z textu popisu na Sreality.             ║\n╚══════════════════════════════════════════════════════════════════════════╝\n\nPOSTUP:\n1. Zavolej Sreality API → důkladně přečti POPIS inzerátu\n2. V popisu HLEDEJ: LV, parcela, p.č., elektřina, voda, plyn, kanalizace\n3. Zavolej BPEJ API → získej kvalitu půdy\n4. Zavolej RÚIAN KÚ API → získej POUZE katastrální území (NE parcely!)\n\nPŘÍKLADY EXTRAKCE Z POPISU:\n- \"Prodej pozemku p.č. 1234/5\" → parcely: \"1234/5\"\n- \"LV 789\" → listy_vlastnictvi: \"789\"\n- \"elektřina na hranici pozemku\" → site_elektrina: \"na hranici\"\n- \"k.ú. Horní Lhota\" → katastralni_uzemi: \"Horní Lhota\"\n\nPokud inzerát NEUVÁDÍ parcelu nebo LV:\n- parcely: \"neuvedeno v inzerátu\"\n- listy_vlastnictvi: \"neuvedeno v inzerátu\"\n- vymera_ruian_m2: \"\" (prázdné, protože nemáš konkrétní parcelu)\n\nVýstup MUSÍ být čistý JSON bez markdown.",
+          "maxIterations": 10
+        }
+      },
+      "id": "eac24a0e-ed18-466b-a518-e76d6fce92a9",
+      "name": "🏞️ AI BATCH Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        0,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// BATCH PARSER v6\nconst input = $input.first().json;\nconst loopItem = $('🔄 Pozemek Loop').first().json;\nlet results = [];\n\ntry {\n  let text = input.output || input.text || input.response || '';\n  if (typeof text !== 'string') text = JSON.stringify(text);\n\n  text = text.replace(/```json\\s*/gi, '').replace(/```\\s*/gi, '').trim();\n\n  const arrayMatch = text.match(/\\[[\\s\\S]*\\]/);\n  if (arrayMatch) {\n    results = JSON.parse(arrayMatch[0]);\n  } else {\n    const objMatch = text.match(/\\{[\\s\\S]*\\}/);\n    if (objMatch) results = [JSON.parse(objMatch[0])];\n  }\n} catch (e) {\n  console.log('Parse error:', e.message);\n}\n\n// FALLBACK\nif (!results || results.length === 0) {\n  results = [{\n    id_hash: loopItem.hash_id || '',\n    nazev: loopItem.nazev_inzerat || '',\n    lokalita: loopItem.lokalita_inzerat || '',\n    cena_czk: loopItem.cena_inzerat || 0,\n    vymera_inzerat_m2: 0,\n    vymera_ruian_m2: '',\n    kontrola_vymery: '',\n    gps_lon_lat: loopItem.gps_arcgis || '',\n    parcely: 'neuvedeno',\n    pocet_parcel: '',\n    katastralni_uzemi: '',\n    listy_vlastnictvi: 'neuvedeno',\n    druh_pozemku: '',\n    zpusob_vyuziti: '',\n    bpej: '',\n    trida_zpf: '',\n    popis_pudy: '',\n    site_elektrina: '',\n    site_voda: '',\n    site_kanalizace: '',\n    site_plyn: '',\n    zdroje_dat: 'FALLBACK',\n    poznamka: 'AI nevrátil data'\n  }];\n}\n\nreturn results.map(d => {\n  const vymeraInz = parseInt(d.vymera_inzerat_m2) || 0;\n  const vymeraRuian = parseInt(d.vymera_ruian_m2) || '';\n  const cena = parseInt(d.cena_czk) || 0;\n  const cenaM2 = vymeraInz > 0 && cena > 0 ? Math.round(cena / vymeraInz) : '';\n\n  return {\n    json: {\n      'ID [hash]': d.id_hash ? `sr_${d.id_hash}` : '',\n      'Název [Sreality]': d.nazev || '',\n      'Lokalita': d.lokalita || '',\n      'Cena [Kč]': cena || '',\n      'Výměra – inzerát [m²]': vymeraInz || '',\n      'Výměra – RÚIAN [m²]': vymeraRuian,\n      'Cena/m² [Kč]': cenaM2,\n      'GPS [LON,LAT]': d.gps_lon_lat || '',\n      'Parcely': d.parcely || '',\n      'Počet parcel': d.pocet_parcel || '',\n      'Katastrální území': d.katastralni_uzemi || '',\n      'Listy vlastnictví': d.listy_vlastnictvi || '',\n      'Druh pozemku [RÚIAN]': d.druh_pozemku || '',\n      'Způsob využití [RÚIAN]': d.zpusob_vyuziti || '',\n      'Kontrola výměry': d.kontrola_vymery || '',\n      'BPEJ': d.bpej || '',\n      'Třída ZPF': d.trida_zpf || '',\n      'Popis půdy': d.popis_pudy || '',\n      'Sítě – elektřina': d.site_elektrina || '',\n      'Sítě – voda': d.site_voda || '',\n      'Sítě – kanalizace': d.site_kanalizace || '',\n      'Sítě – plyn': d.site_plyn || '',\n      'Zdroje dat': d.zdroje_dat || '',\n      'Poznámka': d.poznamka || '',\n      'Odkaz [Sreality]': d.id_hash ? `https://www.sreality.cz/detail/prodej/pozemek/bydleni/x/${d.id_hash}` : '',\n      'Datum [systém]': new Date().toISOString().split('T')[0]\n    }\n  };\n});"
+      },
+      "id": "bf59fab7-6d07-4aee-83ee-4cc7bd5bcd08",
+      "name": "📊 BATCH Parser",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        352,
+        112
+      ]
+    },
+    {
+      "parameters": {
+        "projectId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gen-lang-client-0737675877"
+        },
+        "modelName": "gemini-2.0-flash",
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleVertex",
+      "typeVersion": 1,
+      "position": [
+        16,
+        224
+      ],
+      "id": "991c7a32-8f2e-4e90-a07f-91789cbc3038",
+      "name": "Google Vertex Chat Model1",
+      "credentials": {
+        "googleApi": {
+          "id": "KGzAAuQ37otupHhs",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "toolDescription": "HTTP GET pro volání API.\n\n🔴 POUŽIJ PŘESNOU URL KTEROU DOSTANEŠ!\n\nTypy URL:\n1. Sreality detail: https://www.sreality.cz/api/cs/v2/estates/{hash_id}\n2. BPEJ (kvalita půdy): https://services-eu1.arcgis.com/.../BPEJ.../query?...\n3. RÚIAN KÚ (katastrální území): https://ags.cuzk.cz/.../query?...\n\n⚠️ NIKDY nepoužívej pro hromadné stahování parcel!\nGPS v URL slouží POUZE k identifikaci lokality, NE k seznamu parcel.",
+        "url": "={url}",
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "url",
+              "description": "Kompletní URL - použij přesně jak je, NEMĚŇ JI",
+              "type": "string"
+            }
+          ]
+        },
+        "optimizeResponse": true
+      },
+      "id": "1af14c38-fe20-4c5e-87af-9ae64b573fb1",
+      "name": "http_api_request1",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        144,
+        224
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "🏞️ AI BATCH Agent": {
+      "main": [
+        [
+          {
+            "node": "📊 BATCH Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Vertex Chat Model1": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "🏞️ AI BATCH Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "http_api_request1": {
+      "ai_tool": [
+        [
+          {
+            "node": "🏞️ AI BATCH Agent",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "273e05c8-e353-450f-b810-9c3ecf580106",
+  "meta": {
+    "instanceId": "8e34adb2300e52401f1c93ba0ab7517532d8d52d13b15ba3aac6a6f9125919c4"
+  },
+  "id": "RGWY2gTCWqHd5XjCxjulq",
+  "tags": []
+}
