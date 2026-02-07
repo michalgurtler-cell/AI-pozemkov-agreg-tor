@@ -1,0 +1,96 @@
+Tento text jsem přepracoval do formy profesionálního **technického zadání (Functional Requirements Document)**. Je strukturován tak, aby podle něj mohl vývojář (nebo ty sám) začít okamžitě stavět workflow v n8n.
+
+---
+
+# Technické zadání: Pozemkový Agent (n8n Automation)
+
+## 1. Cíl projektu
+
+Vytvořit automatizované workflow v n8n, které slouží k vyhledávání, analýze a validaci investičních pozemků. Systém propojuje realitní inzerci (Sreality) s daty ze státní správy (RÚIAN, BPEJ), technickými API (PVGIS) a umělou inteligencí (Gemini) pro komplexní vyhodnocení potenciálu pozemku.
+
+---
+
+## 2. Vstupní parametry (n8n Form / Trigger)
+
+Uživatel spouští proces skrze formulář s následujícími poli:
+
+* **Cenové limity:** Maximální cena (Kč).
+* **Výměra:** Minimální plocha ().
+* **Rozsah:** Počet stránek k prohledání.
+* **Typy pozemků:** Orná půda, louka, les, zahrada, stavební, ostatní (multi-select).
+* **Filtry:** Pouze s cenou (ANO/NE), vynechat podíly, vynechat exekuce.
+
+---
+
+## 3. Architektura Workflow (Krok za krokem)
+
+### Fáze 1: Sreality Scraper & Extrakce
+
+* **Listing:** Načtení seznamu inzerátů dle filtrů.
+* **Detail:** Načtení detailu každého inzerátu (HTTP Request).
+* **Data Extraction:** Získání parcelních čísel, čísel LV, kódů katastrálních území (KÚ) a GPS souřadnic.
+* *Priorita:* API data inzerátu > Textový popis (Regex extrakce).
+
+
+
+### Fáze 2: Deduplikace
+
+* **Kontrola:** Porovnání ID inzerátu nebo URL s databází v Google Sheetu.
+* **Logika:** Pokud inzerát již existuje, workflow pro danou větev končí. Zpracovávají se pouze nové záznamy.
+
+### Fáze 3: Datové obohacení (Enrichment)
+
+Tato fáze využívá externí API pro validaci dat "z inzerátu" proti "stavu v katastru".
+
+1. **RÚIAN (Geoportal):**
+* Dohledání kódu KÚ podle GPS.
+* Identifikace konkrétních parcelních objektů.
+* Získání oficiálního druhu pozemku a přesné výměry.
+
+
+2. **BPEJ & LPIS:**
+* U zemědělských pozemků zjištění bonity (třída ochrany ZPF), sklonitosti a expozice.
+* *Poznámka:* U nezemědělských ploch (les, voda) nastavit status "NEMÁ (není ZPF)".
+
+
+3. **PVGIS (Solar Potential):**
+* Výpočet teoretické výtěžnosti pro FVE ().
+* Optimální azimut a sklon pro danou lokalitu.
+
+
+
+> **Speciální logika:** Pokud inzerát obsahuje více parcel, workflow spustí vnořenou smyčku (Loop) pro každou parcelu a výsledky agreguje.
+
+### Fáze 4: AI Analytický Modul (Gemini)
+
+Předání strukturovaného JSON objektu modelu Gemini k vyhodnocení.
+
+* **Analýza potenciálu (Rating 0–100):** Stavební, FVE, MVE (voda), Parkoviště.
+* **Kategorizace:** Určení primárního doporučeného využití.
+* **SWOT analýza:** Stručné shrnutí hlavních výhod a bariér (např. věcná břemena, sklon).
+
+---
+
+## 4. Výstupní data (Google Sheets)
+
+Zápis do tabulky s jasným rozlišením původu dat pomocí prefixů:
+
+| Kategorie | Prefix | Význam |
+| --- | --- | --- |
+| **Ověřeno** | `✓` | Data z oficiálních registrů (RÚIAN, BPEJ, PVGIS) |
+| **Inzerát** | `◉` | Data stažená přímo ze Sreality |
+| **Výpočet** | `⚙` | Interně dopočítaná data (n8n logic) |
+| **AI** | `⚡` | Subjektivní hodnocení modelu Gemini |
+| **Chyba** | `✗` | Údaj se nepodařilo dohledat |
+
+---
+
+## 5. Technické požadavky
+
+* **Platforma:** n8n (Self-hosted nebo Cloud).
+* **API klíče:** Google Sheets API, OpenAI/Gemini API, přístup k PVGIS (zdarma).
+* **Moduly:** HTTP Request (pro scraping a RÚIAN), HTML Extract, Code Node (pro složitou agregaci parcel), Loop Node.
+
+---
+
+**Chceš, abych pro některý z těchto kroků (např. pro ten scraping nebo AI prompt) připravil konkrétní ukázku kódu nebo strukturu JSONu?**

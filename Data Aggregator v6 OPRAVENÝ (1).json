@@ -1,0 +1,1356 @@
+{
+  "name": "Data Aggregator v6 OPRAVENÝ",
+  "nodes": [
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ═══════════════════════════════════════════════════════════════════════════════\n// DATA AGGREGATOR v10 - S DETEKCÍ POZEMKŮ BEZ BPEJ\n// ═══════════════════════════════════════════════════════════════════════════════\n// Opravy v10:\n// - Detekce pozemků které NEMAJÍ BPEJ (les, vodní plocha, zastavěná, ostatní)\n// - Flag bpej_neni_relevantni pro AI\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst DRUHY_POZEMKU = {\n  2: 'orná půda', 3: 'chmelnice', 4: 'vinice', 5: 'zahrada',\n  6: 'ovocný sad', 7: 'trvalý travní porost', 10: 'lesní pozemek',\n  11: 'vodní plocha', 13: 'zastavěná plocha', 14: 'ostatní plocha'\n};\n\nconst ZPUSOBY_VYUZITI = {\n  1: 'skleník', 2: 'školka', 5: 'zeleň', 6: 'rybník', 7: 'zamokřená plocha',\n  10: 'společný dvůr', 11: 'zbořeniště', 14: 'skládka',\n  18: 'komunikace', 23: 'silnice', 24: 'ostatní komunikace', 25: 'neplodná půda'\n};\n\nconst BPEJ_TRIDY = {\n  '01':'I','02':'I','03':'I','04':'I','05':'I','06':'I','07':'I','08':'I','09':'I','10':'I','11':'I','12':'I','13':'I',\n  '14':'II','15':'II','16':'II','17':'II','18':'II','19':'II','20':'II','21':'II','22':'II','23':'II','24':'II','25':'II',\n  '26':'III','27':'III','28':'III','29':'III','30':'III','31':'III','32':'III','33':'III','34':'III','35':'III','36':'III','37':'III','38':'III','39':'III','40':'III',\n  '41':'IV','42':'IV','43':'IV','44':'IV','45':'IV','46':'IV','47':'IV','48':'IV','49':'IV','50':'IV','51':'IV','52':'IV','53':'IV','54':'IV','55':'IV','56':'IV','57':'IV','58':'IV',\n  '59':'V','60':'V','61':'V','62':'V','63':'V','64':'V','65':'V','66':'V','67':'V','68':'V','69':'V','70':'V','71':'V','72':'V','73':'V','74':'V','75':'V','76':'V','77':'V','78':'V'\n};\n\n// Druhy pozemků které NEMAJÍ BPEJ (nejsou zemědělská půda)\nconst DRUHY_BEZ_BPEJ = [10, 11, 13, 14]; // les, vodní plocha, zastavěná, ostatní\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// NAČTENÍ DAT Z NODŮ\n// ═══════════════════════════════════════════════════════════════════════════════\n\nlet priprava = {};\nlet ruianKu = {};\nlet parcelyExtractor = {};\nlet bpejData = {};\nlet pvgisData = {};\n\ntry { \n  priprava = $('Příprava pro API').item.json; \n  console.log('✓ Příprava pro API načtena');\n} catch(e) { \n  console.log('✗ Příprava pro API err:', e.message); \n}\n\ntry { \n  ruianKu = $('🗺️ RÚIAN KÚ HTTP').item.json; \n  console.log('✓ RÚIAN KÚ načten, features:', ruianKu?.features?.length || 0);\n} catch(e) { \n  console.log('✗ RÚIAN KÚ err:', e.message); \n}\n\ntry { \n  parcelyExtractor = $('📍 Parcela GPS Extractor').item.json; \n  console.log('✓ Parcela GPS Extractor, features:', parcelyExtractor?.features?.length || 0);\n} catch(e) { \n  try {\n    parcelyExtractor = $('🗺️ RÚIAN Parcely HTTP').item.json;\n    console.log('✓ RÚIAN Parcely HTTP (fallback), features:', parcelyExtractor?.features?.length || 0);\n  } catch(e2) {\n    console.log('✗ Parcely err:', e2.message); \n  }\n}\n\ntry { \n  bpejData = $('🌾 BPEJ HTTP').item.json; \n  console.log('✓ BPEJ načten, features:', bpejData?.features?.length || 0);\n} catch(e) { \n  console.log('✗ BPEJ err:', e.message); \n}\n\ntry { \n  pvgisData = $('☀️ PVGIS HTTP').item.json; \n  console.log('✓ PVGIS načten, outputs:', pvgisData?.outputs ? 'OK' : 'CHYBÍ');\n} catch(e) { \n  console.log('✗ PVGIS err:', e.message); \n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// ZÁKLADNÍ INFO\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst hashId = priprava.hash_id || '';\nconst nazev = priprava.nazev || '';\nconst popis = priprava.popis || '';\nconst cena = priprava.cena || 0;\nconst lokalita = priprava.lokalita || '';\nconst url = priprava.url || ('https://www.sreality.cz/detail/prodej/pozemek/bydleni/x/' + hashId);\nconst vymeraInzerat = priprava.vymera_inzerat || 0;\nconst maPresneUdaje = priprava.ma_presne_udaje || false;\n\n// Parcely z textu (z Detail Parseru)\nconst parcelyZTextu = priprava.parcely_z_textu || [];\nconst lvZTextu = priprava.lv_z_textu || null;\nconst kuZTextu = priprava.ku_z_textu || null;\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// KÚ Z RÚIAN\n// ═══════════════════════════════════════════════════════════════════════════════\n\nlet kuNazev = '';\nlet kuKod = '';\nif (ruianKu && ruianKu.features && ruianKu.features.length > 0) {\n  const f = ruianKu.features[0].attributes || ruianKu.features[0];\n  kuNazev = f.nazev || '';\n  kuKod = String(f.kod || '');\n}\n\n// Fallback na KÚ z textu\nif (!kuNazev && kuZTextu) {\n  kuNazev = kuZTextu;\n  console.log('  ⚠️ KÚ název z textu:', kuNazev);\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// PARCELY Z RÚIAN (nebo z textu jako fallback)\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst vsechnyParcely = [];\nlet celkovaVymera = 0;\nlet gpsParcela = parcelyExtractor.gps_parcela || '';\n\nif (parcelyExtractor && parcelyExtractor.features && parcelyExtractor.features.length > 0) {\n  for (let i = 0; i < parcelyExtractor.features.length; i++) {\n    const feat = parcelyExtractor.features[i];\n    const f = feat.attributes || feat;\n    const vymera = parseInt(f.vymeraparcely) || 0;\n    \n    vsechnyParcely.push({\n      cislo: f.cisloparcely || '-',\n      vymera: vymera,\n      druhKod: f.druhpozemkukod,\n      druh: DRUHY_POZEMKU[f.druhpozemkukod] || '-',\n      zpusobKod: f.zpusobyvyuzitipozemku,\n      zpusob: ZPUSOBY_VYUZITI[f.zpusobyvyuzitipozemku] || '-'\n    });\n    \n    celkovaVymera += vymera;\n    \n    if (i === 0 && !gpsParcela && feat.geometry && feat.geometry.rings && feat.geometry.rings[0]) {\n      const ring = feat.geometry.rings[0][0];\n      gpsParcela = ring[0] + ',' + ring[1];\n    }\n  }\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// FALLBACK: Parcely z textu pokud RÚIAN nevrátil\n// ═══════════════════════════════════════════════════════════════════════════════\n\nlet parcelyText = '';\nlet druhPozemkuText = '-';\nlet hlavniDruhKod = 0;\n\nif (vsechnyParcely.length > 0) {\n  // Máme parcely z RÚIAN\n  hlavniDruhKod = vsechnyParcely[0].druhKod || 0;\n  \n  parcelyText = vsechnyParcely.map(p => {\n    let t = p.cislo;\n    if (p.druh !== '-') t += ' (' + p.druh + ')';\n    if (p.vymera > 0) t += ' ' + p.vymera.toLocaleString('cs-CZ') + 'm²';\n    return t;\n  }).join(' | ');\n  \n  const druhySet = [...new Set(vsechnyParcely.map(p => p.druh).filter(d => d !== '-'))];\n  druhPozemkuText = druhySet.join(', ') || '-';\n  \n} else if (parcelyZTextu.length > 0) {\n  // Fallback na parcely z textu\n  parcelyText = parcelyZTextu.join(', ');\n  console.log('  ⚠️ Parcely z textu (RÚIAN prázdný):', parcelyText);\n  \n  // Zkusit extrahovat druh z popisu\n  const druhMatch = popis.match(/\\(([Oo]rná půda|[Zz]ahrada|[Ll]es|[Ll]ouka|[Ss]tavební|[Vv]odní)\\)/i);\n  if (druhMatch) {\n    druhPozemkuText = druhMatch[1].toLowerCase();\n    console.log('  ⚠️ Druh z textu:', druhPozemkuText);\n  }\n}\n\nif (!parcelyText) {\n  parcelyText = '-';\n}\n\nconst zpusobySet = [...new Set(vsechnyParcely.map(p => p.zpusob).filter(z => z !== '-'))];\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// BPEJ - S DETEKCÍ POZEMKŮ BEZ BPEJ\n// ═══════════════════════════════════════════════════════════════════════════════\n\nlet bpej = { kod: '', trida: '', sklon: '', expozice: '', popis: '' };\nlet bpejNeniRelevantni = false;\n\nif (DRUHY_BEZ_BPEJ.includes(hlavniDruhKod)) {\n  // Tento typ pozemku NEMÁ BPEJ - není zemědělská půda\n  bpej.kod = 'NEMÁ (není ZPF)';\n  bpejNeniRelevantni = true;\n  console.log('  ℹ️ Druh pozemku', hlavniDruhKod, '(' + DRUHY_POZEMKU[hlavniDruhKod] + ') - BPEJ není relevantní');\n} else if (bpejData && bpejData.features && bpejData.features.length > 0) {\n  const f = bpejData.features[0].attributes || bpejData.features[0];\n  const kod = f.BPEJ || f.KOD_BPEJ || '';\n  \n  if (kod && String(kod).length >= 5) {\n    const kodStr = String(kod).replace(/\\./g, '');\n    bpej.kod = String(kod);\n    \n    const hpj = kodStr.substring(1, 3);\n    bpej.trida = BPEJ_TRIDY[hpj] || 'V';\n    \n    const sklonKod = parseInt(kodStr.substring(3, 4));\n    const sklony = ['rovina 0-3°', 'mírný 3-7°', 'střední 7-12°', 'výrazný 12-17°', 'prudký >17°'];\n    bpej.sklon = sklony[sklonKod] || '-';\n    \n    const expoKod = parseInt(kodStr.substring(4, 5));\n    const expozice = ['rovina', 'J', 'JZ/JV', 'Z/V', 'SZ/SV', 'S'];\n    bpej.expozice = expozice[expoKod] || '-';\n    \n    // Použít TO_ZPF pokud je dostupné\n    if (f.TO_ZPF) {\n      bpej.trida = f.TO_ZPF;\n    }\n    \n    bpej.popis = f.PT_NAZEV || '';\n  }\n} else {\n  bpej.kod = 'NENÍ V LPIS';\n  \n  // Pokud je orná půda ale není v LPIS - divné\n  if (druhPozemkuText.includes('orná')) {\n    console.log('  ⚠️ Orná půda ale NENÍ V LPIS - zkontrolovat GPS!');\n  }\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// PVGIS\n// ═══════════════════════════════════════════════════════════════════════════════\n\nlet pvgis = { vyroba: 0, ozareni: 0, sklon: 0, azimut: 0 };\nif (pvgisData && pvgisData.outputs && pvgisData.outputs.totals && pvgisData.outputs.totals.fixed) {\n  const t = pvgisData.outputs.totals.fixed;\n  pvgis.vyroba = Math.round(t.E_y || 0);\n  pvgis.ozareni = Math.round(t.H_year || 0);\n  if (pvgisData.inputs && pvgisData.inputs.mounting_system && pvgisData.inputs.mounting_system.fixed) {\n    pvgis.sklon = pvgisData.inputs.mounting_system.fixed.slope || 0;\n    pvgis.azimut = pvgisData.inputs.mounting_system.fixed.azimuth || 0;\n  }\n} else {\n  console.log('  ⚠️ PVGIS nevrátil data');\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// KVALITA DAT\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst maParcely = vsechnyParcely.length > 0 || parcelyZTextu.length > 0;\nconst maVymeru = celkovaVymera > 0;\nconst maBpej = bpej.kod && bpej.kod !== 'NENÍ V LPIS' && bpej.kod !== 'NEMÁ (není ZPF)';\nconst maKu = kuKod !== '';\n\nlet dataKvalita = 'D_GPS_ONLY';\nlet zdrojDat = [];\n\nif (maPresneUdaje && vsechnyParcely.length > 0 && maVymeru && maKu) {\n  dataKvalita = 'A_PARCELY_PRESNE';\n  zdrojDat.push('RÚIAN (parcely)');\n} else if (vsechnyParcely.length > 0 && maVymeru && maKu) {\n  dataKvalita = 'B_GPS_PARCELA';\n  zdrojDat.push('RÚIAN (GPS)');\n} else if (parcelyZTextu.length > 0) {\n  dataKvalita = 'B_INZERAT_PARCELA';\n  zdrojDat.push('Inzerát (parcely)');\n} else if (maKu) {\n  dataKvalita = 'C_POUZE_KU';\n  zdrojDat.push('RÚIAN (KÚ)');\n}\n\nif (maBpej) zdrojDat.push('LPIS');\nif (bpejNeniRelevantni) zdrojDat.push('BPEJ N/A');\nif (pvgis.vyroba > 0) zdrojDat.push('PVGIS');\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// CENA ZA M² - S FALLBACK NA VÝMĚRU Z INZERÁTU\n// ═══════════════════════════════════════════════════════════════════════════════\n\n// Preferovat RÚIAN výměru, fallback na inzerát\nconst vymeraPouzi = celkovaVymera > 0 ? celkovaVymera : vymeraInzerat;\nconst cenaM2 = vymeraPouzi > 0 ? Math.round(cena / vymeraPouzi) : 0;\n\nif (celkovaVymera === 0 && vymeraInzerat > 0) {\n  console.log('  ⚠️ Cena/m² z výměry inzerátu:', cenaM2, 'Kč/m²');\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// LOG\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('DATA AGGREGATOR v10 VÝSLEDEK:');\nconsole.log('  Hash:', hashId);\nconsole.log('  Cena:', cena, 'Kč');\nconsole.log('  Cena/m²:', cenaM2, 'Kč/m²');\nconsole.log('  KÚ:', kuNazev, '(' + kuKod + ')');\nconsole.log('  Parcely RÚIAN:', vsechnyParcely.length, 'ks');\nconsole.log('  Parcely z textu:', parcelyZTextu.length, 'ks');\nconsole.log('  Výměra RÚIAN:', celkovaVymera, 'm²');\nconsole.log('  Výměra inzerát:', vymeraInzerat, 'm²');\nconsole.log('  Hlavní druh:', hlavniDruhKod, '(' + DRUHY_POZEMKU[hlavniDruhKod] + ')');\nconsole.log('  LV:', lvZTextu || '-');\nconsole.log('  BPEJ:', bpej.kod, bpejNeniRelevantni ? '(není relevantní)' : ('- třída ' + bpej.trida));\nconsole.log('  PVGIS:', pvgis.vyroba, 'kWh/kWp');\nconsole.log('  Kvalita:', dataKvalita);\nconsole.log('═══════════════════════════════════════════════');\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// VÝSTUP\n// ═══════════════════════════════════════════════════════════════════════════════\n\nreturn {\n  json: {\n    // Identifikace\n    hash_id: hashId,\n    dedup_key: priprava.dedup_key || ('sr_' + hashId),\n    \n    // Základní info\n    nazev: nazev,\n    url: url,\n    lokalita: lokalita,\n    \n    // Cena a výměra\n    cena_czk: cena,\n    cena_m2: cenaM2,\n    vymera_inzerat: vymeraInzerat,\n    vymera_m2: celkovaVymera > 0 ? celkovaVymera : vymeraInzerat, // Fallback\n    \n    // GPS\n    gps_original: priprava.gps_original || '',\n    gps_arcgis: priprava.gps_arcgis || '',\n    gps_lat: priprava.gps_lat || '',\n    gps_lon: priprava.gps_lon || '',\n    gps_parcela: gpsParcela,\n    \n    // KÚ\n    ku_nazev: kuNazev,\n    ku_kod: kuKod,\n    \n    // Parcely\n    parcely: parcelyText,\n    parcely_pocet: vsechnyParcely.length > 0 ? vsechnyParcely.length : parcelyZTextu.length,\n    parcely_detail: vsechnyParcely,\n    parcely_z_textu: parcelyZTextu,\n    lv: lvZTextu || '-',\n    \n    // Druh a využití\n    druh_pozemku: druhPozemkuText,\n    zpusob_vyuziti: zpusobySet.join(', ') || '-',\n    hlavni_druh_kod: hlavniDruhKod,\n    \n    // BPEJ\n    bpej_kod: bpej.kod,\n    bpej_trida: bpej.trida,\n    bpej_sklon: bpej.sklon,\n    bpej_expozice: bpej.expozice,\n    bpej_popis: bpej.popis,\n    bpej_neni_relevantni: bpejNeniRelevantni,\n    \n    // PVGIS\n    fve_vyroba_kwh: pvgis.vyroba,\n    fve_ozareni: pvgis.ozareni,\n    fve_sklon: pvgis.sklon,\n    fve_azimut: pvgis.azimut,\n    \n    // Metadata\n    ma_presne_udaje: maPresneUdaje,\n    data_kvalita: dataKvalita,\n    zdroje_dat: zdrojDat.join(', '),\n    \n    // Popis\n    popis_text: popis\n  }\n};"
+      },
+      "id": "81ff9df3-501c-4a90-a961-44542072276a",
+      "name": "📊 Data Aggregator",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1072,
+        992
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════════════════════\n// 📍 PARCELA GPS EXTRACTOR v1\n// ═══════════════════════════════════════════════════════════════════════════════\n// Účel: Extrahuje přesnou GPS souřadnici z RÚIAN parcely pro BPEJ dotaz\n// Vstup: Response z RÚIAN Parcely HTTP (features[].geometry.rings)\n// Výstup: Původní data + gps_parcela (LON,LAT formát pro ArcGIS)\n// ═══════════════════════════════════════════════════════════════════════════════\n// Umístění ve FLOW:\n//   RÚIAN Parcely HTTP → 📍 Parcela GPS Extractor → BPEJ HTTP\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst input = $input.item.json;\n\n// Získat GPS z Příprava pro API jako fallback\nlet gpsFallback = '';\ntry {\n  gpsFallback = $('Příprava pro API').item.json.gps_arcgis || '';\n} catch (e) {\n  try {\n    gpsFallback = $('📍 GPS Transformer').item.json.gps_arcgis || '';\n  } catch (e2) {\n    try {\n      gpsFallback = $('📦 BATCH Kolekce v7').item.json.gps_arcgis || '';\n    } catch (e3) {\n      console.log('⚠️ Fallback GPS nenalezen');\n    }\n  }\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// EXTRAKCE GPS Z PARCELY\n// ═══════════════════════════════════════════════════════════════════════════════\n\nlet gpsParcela = '';\nlet gpsZdroj = 'FALLBACK';\n\n// Zkontrolovat jestli máme features z RÚIAN\nif (input.features && \n    input.features.length > 0 && \n    input.features[0].geometry && \n    input.features[0].geometry.rings && \n    input.features[0].geometry.rings[0] &&\n    input.features[0].geometry.rings[0][0]) {\n  \n  // První bod prvního polygonu první parcely\n  const prvniBod = input.features[0].geometry.rings[0][0];\n  const lon = prvniBod[0];  // LON je první (ArcGIS formát)\n  const lat = prvniBod[1];  // LAT je druhý\n  \n  // Validace pro ČR (LON: 11-20, LAT: 48-52)\n  if (lon >= 11 && lon <= 20 && lat >= 48 && lat <= 52) {\n    gpsParcela = lon + ',' + lat;\n    gpsZdroj = 'PARCELA';\n    console.log('✓ GPS z parcely:', gpsParcela);\n  } else {\n    console.log('⚠️ GPS z parcely mimo ČR:', lon, lat);\n    gpsParcela = gpsFallback;\n    gpsZdroj = 'FALLBACK (parcela mimo ČR)';\n  }\n} else {\n  // Parcela nenalezena - použít fallback\n  gpsParcela = gpsFallback;\n  gpsZdroj = 'FALLBACK (parcela nenalezena)';\n  console.log('⚠️ Parcela bez geometrie, použit fallback:', gpsFallback);\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// VÝSTUP - původní data + gps_parcela\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('📍 PARCELA GPS EXTRACTOR');\nconsole.log('  Features:', input.features?.length || 0);\nconsole.log('  GPS parcela:', gpsParcela);\nconsole.log('  Zdroj:', gpsZdroj);\nconsole.log('═══════════════════════════════════════════════');\n\nreturn {\n  json: {\n    // Původní RÚIAN response (pro Data Aggregator)\n    ...input,\n    \n    // Nové pole s GPS parcely\n    gps_parcela: gpsParcela,\n    gps_parcela_zdroj: gpsZdroj,\n    \n    // Pro snadný přístup v BPEJ\n    geometry_for_bpej: gpsParcela\n  }\n};\n"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        400,
+        992
+      ],
+      "id": "9ef444de-5dce-4b5b-a6d5-d880ae868e1c",
+      "name": "📍 Parcela GPS Extractor"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════════════════════\n// Příprava pro API\n// ═══════════════════════════════════════════════════════════════════════════════\n// Účel: Transformace GPS pro ArcGIS + příprava dat pro RÚIAN\n// Vstup: Data z Sreality Detail Parser (už má GPS, parcely, LV)\n// Výstup: Data připravená pro RÚIAN KÚ HTTP, RÚIAN Parcely HTTP, BPEJ, PVGIS\n// ═══════════════════════════════════════════════════════════════════════════════\n// [2026-01-29]\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst items = $input.all();\nconst pozemky = [];\n\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('BATCH KOLEKCE v7 - TRANSFORMACE PRO API');\nconsole.log('  Vstup:', items.length, 'položek');\nconsole.log('═══════════════════════════════════════════════');\n\nfor (const item of items) {\n  const d = item.json;\n  \n  // Skip prázdných\n  if (!d || d._empty) {\n    console.log('  ⚠️ Přeskakuji prázdnou položku');\n    continue;\n  }\n  \n  const hashId = String(d.hash_id || '').trim();\n  if (!hashId) {\n    console.log('  ⚠️ Přeskakuji položku bez hash_id');\n    continue;\n  }\n  \n  // ═══════════════════════════════════════════════════════════════════════════\n  // GPS TRANSFORMACE: LAT,LON → LON,LAT (pro ArcGIS)\n  // ═══════════════════════════════════════════════════════════════════════════\n  // Sreality vrací: \"50.545238,14.020591\" (LAT,LON)\n  // ArcGIS potřebuje: \"14.020591,50.545238\" (LON,LAT)\n  \n  let gpsArcgis = '';\n  let gpsLat = d.gps_lat || '';\n  let gpsLon = d.gps_lon || '';\n  let gpsValid = d.gps_valid || false;\n  \n  // Pokud máme lat/lon z parseru, použijeme je\n  if (gpsLat && gpsLon) {\n    gpsArcgis = gpsLon + ',' + gpsLat;  // LON,LAT pro ArcGIS!\n  }\n  // Fallback - parsujeme z gps stringu\n  else if (d.gps && d.gps.includes(',')) {\n    const parts = d.gps.split(',');\n    if (parts.length === 2) {\n      gpsLat = parts[0].trim();\n      gpsLon = parts[1].trim();\n      const latNum = parseFloat(gpsLat);\n      const lonNum = parseFloat(gpsLon);\n      \n      // Validace pro ČR\n      if (latNum >= 48 && latNum <= 52 && lonNum >= 11 && lonNum <= 20) {\n        gpsArcgis = gpsLon + ',' + gpsLat;  // LON,LAT pro ArcGIS!\n        gpsValid = true;\n      } else {\n        console.log('  ⚠️ GPS mimo ČR:', d.gps);\n        gpsValid = false;\n      }\n    }\n  }\n  \n  // ═══════════════════════════════════════════════════════════════════════════\n  // PARCELY - použijeme z Detail Parseru, jen vytvoříme SQL formát\n  // ═══════════════════════════════════════════════════════════════════════════\n  \n  const parcelyZTextu = d.parcely_z_textu || [];\n  const parcelySql = parcelyZTextu.length > 0 \n    ? parcelyZTextu.map(p => \"'\" + p + \"'\").join(',')\n    : '';\n  \n  // ═══════════════════════════════════════════════════════════════════════════\n  // VÝSTUP\n  // ═══════════════════════════════════════════════════════════════════════════\n  \n  const output = {\n    // ─── Identifikace ───\n    hash_id: hashId,\n    dedup_key: d.dedup_key || ('sr_' + hashId),\n    \n    // ─── Základní info z inzerátu ───\n    nazev: d.nazev || '',\n    url: d.url || ('https://www.sreality.cz/detail/prodej/pozemek/bydleni/x/' + hashId),\n    lokalita: d.lokalita || '',\n    kategorie: d.kategorie || 'Ostatní',\n    \n    // ─── Cena a výměra ───\n    cena: d.cena || 0,\n    vymera_inzerat: d.vymera_inzerat || 0,\n    \n    // ─── GPS - RŮZNÉ FORMÁTY ───\n    gps_original: d.gps || '',           // Původní formát LAT,LON\n    gps_arcgis: gpsArcgis,               // Pro ArcGIS: LON,LAT\n    gps_lat: gpsLat,                     // Latitude samostatně\n    gps_lon: gpsLon,                     // Longitude samostatně\n    gps_valid: gpsValid,\n    \n    // ─── Popis ───\n    popis: d.popis || '',\n    \n    // ─── Extrahované z textu (z Detail Parseru) ───\n    parcely_z_textu: parcelyZTextu,\n    parcely_sql: parcelySql,             // Pro RÚIAN WHERE IN klauzuli\n    lv_z_textu: d.lv_z_textu || null,\n    ku_z_textu: d.ku_z_textu || null,\n    \n    // ─── Flagy pro rozhodování ───\n    ma_parcely: parcelyZTextu.length > 0,\n    ma_lv: d.lv_z_textu !== null && d.lv_z_textu !== undefined,\n    ma_presne_udaje: d.ma_presne_udaje || (parcelyZTextu.length > 0) || (d.lv_z_textu !== null),\n    \n    // ─── Config (pro další nody) ───\n    config: d.config || {}\n  };\n  \n  pozemky.push({ json: output });\n  \n  console.log('  ✓', hashId, '|', output.nazev.substring(0, 30), '| GPS:', gpsArcgis || 'CHYBÍ', '| Parcely:', parcelyZTextu.length);\n}\n\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('BATCH KOLEKCE v7 - VÝSLEDEK:');\nconsole.log('  Výstup:', pozemky.length, 'položek');\nif (pozemky.length > 0) {\n  const p = pozemky[0].json;\n  console.log('  Příklad:');\n  console.log('    GPS original:', p.gps_original);\n  console.log('    GPS ArcGIS:', p.gps_arcgis);\n  console.log('    Parcely:', p.parcely_z_textu.join(', ') || 'ŽÁDNÉ');\n  console.log('    Parcely SQL:', p.parcely_sql || 'ŽÁDNÉ');\n  console.log('    LV:', p.lv_z_textu || 'ŽÁDNÉ');\n  console.log('    Má přesné údaje:', p.ma_presne_udaje);\n}\nconsole.log('═══════════════════════════════════════════════');\n\nreturn pozemky.length > 0 ? pozemky : [{ json: { _empty: true } }];\n"
+      },
+      "id": "199ec86a-2001-436f-9001-638e819f75dd",
+      "name": "Příprava pro API",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -272,
+        992
+      ]
+    },
+    {
+      "parameters": {
+        "amount": 0.3
+      },
+      "id": "ded90f6a-6ace-4e33-89e8-45d757c49809",
+      "name": "⏳ API Pauza",
+      "type": "n8n-nodes-base.wait",
+      "typeVersion": 1.1,
+      "position": [
+        -848,
+        992
+      ],
+      "webhookId": "1a7a171c-05f2-4059-8e49-9e1e149cd4c8"
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "143fce1f-2a1f-4d54-9300-a668ad914fd7",
+      "name": "🔄 Sreality Detail Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -1296,
+        896
+      ]
+    },
+    {
+      "parameters": {
+        "url": "=https://www.sreality.cz/api/cs/v2/estates/{{ $json.hash_id }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "c4e8bb47-18d3-4b4a-97e8-23fd978956f0",
+      "name": "🏠 Sreality Detail HTTP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -1072,
+        992
+      ],
+      "alwaysOutputData": true,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// ═══════════════════════════════════════════════════════════════════════════════\n// SREALITY DETAIL PARSER v86 - OPRAVENÝ REGEX PRO PARCELY\n// ═══════════════════════════════════════════════════════════════════════════════\n// Opravy v86:\n// - Přidán REGEX pro bullet format: \"• Parcela č. 6005\"\n// - Přidán REGEX pro LV z bullet formátu: \"LV č. 642\"\n// - Lepší extrakce výměry z popisu\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst httpResponse = $input.item.json;\n\n// Získat hash_id z loop nodu\nlet loopItem = {};\ntry {\n  loopItem = $('🔄 Sreality Detail Loop1').item.json || {};\n} catch (e) {\n  try {\n    loopItem = $('🔄 Sreality Detail Loop').item.json || {};\n  } catch (e2) {\n    loopItem = {};\n  }\n}\n\nconst hashId = loopItem.hash_id || httpResponse.hash_id || httpResponse._embedded?.estates?.[0]?.hash_id || '';\n\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('SREALITY DETAIL PARSER v86');\nconsole.log('  Hash ID:', hashId);\nconsole.log('═══════════════════════════════════════════════');\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// 1. ZÁKLADNÍ DATA Z API RESPONSE\n// ═══════════════════════════════════════════════════════════════════════════════\n\nlet nazev = '';\nlet popis = '';\nlet cena = 0;\nlet vymeraZInzeratu = 0;\nlet gps = '';\nlet gpsLat = '';\nlet gpsLon = '';\nlet gpsValid = false;\nlet lokalita = '';\nlet url = '';\n\nconst item = httpResponse._embedded?.estates?.[0] || httpResponse;\n\n// NÁZEV\nif (item.name) {\n  nazev = typeof item.name === 'object' ? (item.name.value || '') : item.name;\n}\nif (!nazev && item.meta_description) {\n  nazev = item.meta_description;\n}\nif (!nazev) {\n  nazev = loopItem.nazev || 'Pozemek';\n}\n\n// POPIS\nif (item.text) {\n  popis = typeof item.text === 'object' ? (item.text.value || '') : item.text;\n}\n\n// CENA\nif (item.price_czk?.value_raw) {\n  cena = item.price_czk.value_raw;\n} else if (item.price_czk?.value) {\n  cena = item.price_czk.value;\n} else if (typeof item.price === 'number') {\n  cena = item.price;\n} else {\n  cena = loopItem.cena || 0;\n}\n\n// LOKALITA\nif (item.locality?.value) {\n  lokalita = item.locality.value;\n} else if (item.seo?.locality) {\n  lokalita = item.seo.locality;\n} else {\n  lokalita = loopItem.lokalita || '';\n}\n\n// GPS\nif (item.map?.lat && item.map?.lon) {\n  gpsLat = String(item.map.lat);\n  gpsLon = String(item.map.lon);\n  gps = gpsLat + ',' + gpsLon;\n  gpsValid = true;\n} else if (loopItem.gps) {\n  gps = loopItem.gps;\n  const parts = gps.split(',');\n  if (parts.length === 2) {\n    gpsLat = parts[0].trim();\n    gpsLon = parts[1].trim();\n    gpsValid = true;\n  }\n}\n\n// Validace GPS pro ČR\nif (gpsValid) {\n  const lat = parseFloat(gpsLat);\n  const lon = parseFloat(gpsLon);\n  if (lat < 48 || lat > 52 || lon < 11 || lon > 20) {\n    console.log('  ⚠️ GPS mimo ČR:', lat, lon);\n    gpsValid = false;\n  }\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// VÝMĚRA Z INZERÁTU - více metod\n// ═══════════════════════════════════════════════════════════════════════════════\n\n// Metoda 1: Z items pole\nconst itemsData = item.items || [];\nfor (const it of itemsData) {\n  const itName = (it.name || '').toLowerCase();\n  if (itName.includes('plocha') || itName.includes('výměra')) {\n    const val = String(it.value || '').replace(/[^0-9]/g, '');\n    vymeraZInzeratu = parseInt(val) || 0;\n    if (vymeraZInzeratu > 0) break;\n  }\n}\n\n// Metoda 2: Z názvu\nif (!vymeraZInzeratu) {\n  const vymeraMatch = nazev.match(/([\\d\\s]+)\\s*m²/);\n  if (vymeraMatch) {\n    vymeraZInzeratu = parseInt(vymeraMatch[1].replace(/\\s/g, '')) || 0;\n  }\n}\n\n// Metoda 3: Z popisu - \"o výměře 2398 m²\"\nif (!vymeraZInzeratu) {\n  const vymeraPopMatch = popis.match(/o\\s+výměře\\s+([\\d\\s]+)\\s*m²/i);\n  if (vymeraPopMatch) {\n    vymeraZInzeratu = parseInt(vymeraPopMatch[1].replace(/\\s/g, '')) || 0;\n  }\n}\n\n// Metoda 4: Z popisu - \"celkové výměře 2398 m²\"\nif (!vymeraZInzeratu) {\n  const vymeraCelkMatch = popis.match(/celkov[ée]\\s+výměře?\\s+([\\d\\s]+)\\s*m²/i);\n  if (vymeraCelkMatch) {\n    vymeraZInzeratu = parseInt(vymeraCelkMatch[1].replace(/\\s/g, '')) || 0;\n  }\n}\n\n// URL\nconst seoLocality = (item.seo?.locality || lokalita || 'pozemek')\n  .toLowerCase()\n  .replace(/\\s+/g, '-')\n  .replace(/[^a-z0-9-]/g, '');\nurl = 'https://www.sreality.cz/detail/prodej/pozemek/bydleni/x/' + hashId;\n\nconst kategorie = loopItem.kategorie || 'pozemek';\nconst kategorieKod = loopItem.kategorie_kod || 0;\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// 2. EXTRAKCE PARCEL A LV Z TEXTU - VYLEPŠENÉ REGEX\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst fullText = nazev + ' ' + popis;\nconst parcelyZTextu = [];\nconst parcelySet = new Set();\n\n// ─────────────────────────────────────────────────────────────────────────────\n// REGEX 0: BULLET FORMAT \"• Parcela č. 6005 - o výměře\"\n// ─────────────────────────────────────────────────────────────────────────────\nconst bulletParcelaRegex = /[•·\\-]\\s*Parcela\\s+č\\.?\\s*(\\d+(?:\\/\\d+)?)/gi;\nlet matchBullet;\nwhile ((matchBullet = bulletParcelaRegex.exec(fullText)) !== null) {\n  const p = matchBullet[1].trim();\n  if (p && !parcelySet.has(p)) {\n    parcelySet.add(p);\n    parcelyZTextu.push(p);\n    console.log('  ✓ Parcela z bullet:', p);\n  }\n}\n\n// ─────────────────────────────────────────────────────────────────────────────\n// REGEX 1: \"parcely č. 749, 750, 754, 758/1 a 837/5\"\n// ─────────────────────────────────────────────────────────────────────────────\nconst parcelyListMatch = fullText.match(/parcel[ay]?\\s+č\\.?\\s*([\\d\\s,/a]+?)(?:\\.|,\\s*(?![\\d])|\\n|v\\s+k\\.?ú|$)/i);\nif (parcelyListMatch) {\n  const parcelyStr = parcelyListMatch[1];\n  const parts = parcelyStr.split(/[,\\s]+(?:a\\s+)?|\\s+a\\s+/);\n  for (const p of parts) {\n    const clean = p.trim();\n    if (clean && /^\\d+(?:\\/\\d+)?$/.test(clean) && !parcelySet.has(clean)) {\n      parcelySet.add(clean);\n      parcelyZTextu.push(clean);\n    }\n  }\n}\n\n// ─────────────────────────────────────────────────────────────────────────────\n// REGEX 2: \"p.č. 123\" nebo \"parc. 123/4\" nebo \"parcela 123\"\n// ─────────────────────────────────────────────────────────────────────────────\nconst parcelyRegex = /(?:parcela|parc\\.?|p\\.?\\s*č\\.?|st\\.)\\s*[:\\s]*(\\d+(?:\\/\\d+)?)/gi;\nlet matchP;\nwhile ((matchP = parcelyRegex.exec(fullText)) !== null) {\n  const p = matchP[1].trim();\n  if (p && !parcelySet.has(p)) {\n    parcelySet.add(p);\n    parcelyZTextu.push(p);\n  }\n}\n\n// ─────────────────────────────────────────────────────────────────────────────\n// REGEX 3: Čísla s lomítkem (123/4, 1234/56) - ale ne datumy\n// ─────────────────────────────────────────────────────────────────────────────\nconst cislaLomitkoRegex = /\\b(\\d{2,5}\\/\\d{1,4})\\b/g;\nwhile ((matchP = cislaLomitkoRegex.exec(fullText)) !== null) {\n  const p = matchP[1];\n  // Vyloučit datumy (1/2, 12/24 atd.)\n  const parts = p.split('/');\n  if (parseInt(parts[0]) > 31 || parseInt(parts[1]) > 12) {\n    if (!parcelySet.has(p)) {\n      parcelySet.add(p);\n      parcelyZTextu.push(p);\n    }\n  }\n}\n\n// ─────────────────────────────────────────────────────────────────────────────\n// REGEX 4: LV (list vlastnictví) - více formátů\n// ─────────────────────────────────────────────────────────────────────────────\nlet lvZTextu = null;\n\n// \"LV č. 642\"\nconst lvMatch1 = fullText.match(/LV\\s+č\\.?\\s*(\\d+)/i);\nif (lvMatch1) {\n  lvZTextu = lvMatch1[1];\n}\n\n// \"list vlastnictví č. 642\" nebo \"listu vlastnictví 642\"\nif (!lvZTextu) {\n  const lvMatch2 = fullText.match(/list[uůa]?\\s+vlastnictví\\s+č?\\.?\\s*(\\d+)/i);\n  if (lvMatch2) {\n    lvZTextu = lvMatch2[1];\n  }\n}\n\n// \"l.v. 642\"\nif (!lvZTextu) {\n  const lvMatch3 = fullText.match(/l\\.?\\s*v\\.?\\s*č?\\.?\\s*(\\d+)/i);\n  if (lvMatch3) {\n    lvZTextu = lvMatch3[1];\n  }\n}\n\n// ─────────────────────────────────────────────────────────────────────────────\n// REGEX 5: Katastrální území z textu\n// ─────────────────────────────────────────────────────────────────────────────\nlet kuZTextu = null;\n\n// \"k.ú. České Meziříčí\"\nconst kuMatch1 = fullText.match(/k\\.?\\s*ú\\.?\\s+([A-Za-zÁ-Žá-ž\\s\\-]+?)(?:\\n|LV|$)/i);\nif (kuMatch1) {\n  kuZTextu = kuMatch1[1].trim();\n}\n\n// \"katastrální území Besedice\"\nif (!kuZTextu) {\n  const kuMatch2 = fullText.match(/katastrální[m]?\\s+územ[ií]\\s+([A-Za-zÁ-Žá-ž\\s\\-]+?)(?:\\.|,|\\n|$)/i);\n  if (kuMatch2) {\n    kuZTextu = kuMatch2[1].trim();\n  }\n}\n\nconsole.log('  Název:', nazev.substring(0, 50) + '...');\nconsole.log('  Cena:', cena);\nconsole.log('  Výměra z inzerátu:', vymeraZInzeratu, 'm²');\nconsole.log('  GPS:', gps, gpsValid ? '✓' : '✗');\nconsole.log('  Parcely:', parcelyZTextu.length, '[' + parcelyZTextu.join(', ') + ']');\nconsole.log('  LV:', lvZTextu || '-');\nconsole.log('  KÚ z textu:', kuZTextu || '-');\nconsole.log('═══════════════════════════════════════════════');\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// ─────────────────────────────────────────────────────────────────────────────\n// REGEX 6: \"parcelní číslo 182\" nebo \"parcelním číslem 182\"\n// ─────────────────────────────────────────────────────────────────────────────\nconst parcelniCisloRegex = /parcel[níém]+\\s+čísl[oaem]+\\s*(\\d+(?:\\/\\d+)?)/gi;\nlet matchPC;\nwhile ((matchPC = parcelniCisloRegex.exec(fullText)) !== null) {\n  const p = matchPC[1].trim();\n  if (p && !parcelySet.has(p)) {\n    parcelySet.add(p);\n    parcelyZTextu.push(p);\n    console.log('  ✓ Parcela z \"parcelní číslo\":', p);\n  }\n}\n// VÝSTUP\n// ═══════════════════════════════════════════════════════════════════════════════\n\nreturn {\n  json: {\n    // Identifikace\n    hash_id: hashId,\n    dedup_key: 'sr_' + hashId,\n    \n    // Základní info\n    nazev: nazev,\n    url: url,\n    lokalita: lokalita,\n    kategorie: kategorie,\n    kategorie_kod: kategorieKod,\n    \n    // Cena a výměra\n    cena: cena,\n    vymera_inzerat: vymeraZInzeratu,\n    \n    // GPS\n    gps: gps,\n    gps_lat: gpsLat,\n    gps_lon: gpsLon,\n    gps_valid: gpsValid,\n    \n    // Popis\n    popis: popis,\n    \n    // Extrahované z textu\n    parcely_z_textu: parcelyZTextu,\n    lv_z_textu: lvZTextu,\n    ku_z_textu: kuZTextu,\n    \n    // Flagy\n    ma_parcely: parcelyZTextu.length > 0,\n    ma_lv: lvZTextu !== null,\n    ma_presne_udaje: parcelyZTextu.length > 0 || lvZTextu !== null,\n    \n    // Config\n    config: loopItem.config || {}\n  }\n};\n"
+      },
+      "id": "7d1cf146-0c35-44d5-9434-ef80f2de8036",
+      "name": "🏠 Sreality fáze 2",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -560,
+        992
+      ],
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "toolDescription": "Volá externí API pro získání dat o pozemcích. POUŽIJ POUZE když data_kvalita = C_POUZE_KU nebo D_GPS_ONLY!\n\nPokud data_kvalita = A_PARCELY_PRESNE nebo B_GPS_PARCELA → NEVOLEJ TOTO API, máš kompletní data!\n\n═══════════════════════════════════════════════════════════════════════════════\nDOSTUPNÁ API A JEJICH URL:\n═══════════════════════════════════════════════════════════════════════════════\n\n1. RÚIAN KÚ (zjistit katastrální území podle GPS):\nhttps://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/7/query?geometry={LON},{LAT}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=nazev,kod&f=json\n\n2. RÚIAN PARCELY (zjistit parcely podle GPS):\nhttps://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/0/query?geometry={LON},{LAT}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=vymeraparcely,druhpozemkukod,cisloparcely,zpusobyvyuzitipozemku&returnGeometry=true&f=json\n\n3. RÚIAN PARCELY podle čísla (pokud znáš KÚ kód):\nhttps://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/0/query?where=katastralniuzemi={KU_KOD}+AND+cisloparcely='{CISLO_PARCELY}'&outFields=vymeraparcely,druhpozemkukod,cisloparcely,zpusobyvyuzitipozemku&returnGeometry=true&f=json\n\n4. BPEJ (bonita půdy) - POZOR: MUSÍ obsahovat where=1%3D1:\nhttps://services-eu1.arcgis.com/BHXB6o04ZWuSXg2G/arcgis/rest/services/BPEJ_obohacene/FeatureServer/0/query?where=1%3D1&geometry={LON},{LAT}&geometryType=esriGeometryPoint&inSR=4326&spatialRel=esriSpatialRelIntersects&outFields=BPEJ,TO_ZPF,PT_NAZEV&returnGeometry=false&f=json\n\n5. PVGIS (solární potenciál) - POZOR: opačné pořadí lat/lon:\nhttps://re.jrc.ec.europa.eu/api/v5_3/PVcalc?lat={LAT}&lon={LON}&peakpower=1&loss=14&outputformat=json&optimalangles=1\n\n═══════════════════════════════════════════════════════════════════════════════\nGPS SOUŘADNICE - KRITICKÉ!\n═══════════════════════════════════════════════════════════════════════════════\nPro ArcGIS (RÚIAN, BPEJ): geometry={LON},{LAT}\n  → LON je PRVNÍ (číslo 12-19 pro ČR)\n  → LAT je DRUHÉ (číslo 48-51 pro ČR)\n  → Použij hodnotu z gps_arcgis nebo gps_parcela (už je ve správném pořadí!)\n\nPro PVGIS: lat={LAT}&lon={LON}\n  → Normální pořadí\n  → Použij hodnoty gps_lat a gps_lon\n\n═══════════════════════════════════════════════════════════════════════════════\nDEKÓDOVÁNÍ ODPOVĚDÍ:\n═══════════════════════════════════════════════════════════════════════════════\ndruhpozemkukod:\n  2 = orná půda\n  3 = chmelnice\n  4 = vinice\n  5 = zahrada\n  6 = ovocný sad\n  7 = trvalý travní porost (TTP/louka)\n  10 = lesní pozemek\n  11 = vodní plocha\n  13 = zastavěná plocha\n  14 = ostatní plocha\n\nTO_ZPF (třída ochrany ZPF):\n  I, II = Vysoce chráněná půda → obtížné vynětí → MALUS pro FVE\n  III, IV, V = Méně chráněná → snadné vynětí → BONUS pro FVE\n\n═══════════════════════════════════════════════════════════════════════════════\nDŮLEŽITÉ:\n═══════════════════════════════════════════════════════════════════════════════\n• NIKDY nedekóduj 1%3D1 na 1=1 v BPEJ URL!\n• Pokud API vrátí prázdné features[], pozemek není v databázi\n• Pro BPEJ: prázdný výsledek = pozemek není zemědělská půda",
+        "url": "={url}",
+        "placeholderDefinitions": {
+          "values": [
+            {
+              "name": "url",
+              "description": "Kompletní URL. Pro ArcGIS je geometry={LON},{LAT} (PROHOZENÉ!). Pro PVGIS je lat={LAT}&lon={LON}. Nikdy nedekóduj %3D.",
+              "type": "string"
+            }
+          ]
+        },
+        "optimizeResponse": true
+      },
+      "id": "2f03824a-12f5-437f-8975-0cf14c47105e",
+      "name": "HTTP_API_Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1.1,
+      "position": [
+        -496,
+        800
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "37f73e3e-2436-4c4b-a664-e8e492813f66",
+      "name": "🏠 Next Detail",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        1296,
+        1056
+      ]
+    },
+    {
+      "parameters": {
+        "url": "https://services-eu1.arcgis.com/BHXB6o04ZWuSXg2G/arcgis/rest/services/BPEJ_obohacene/FeatureServer/0/query",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "where",
+              "value": "1=1"
+            },
+            {
+              "name": "geometry",
+              "value": "={{ $('📍 Parcela GPS Extractor').item.json.gps_parcela }}"
+            },
+            {
+              "name": "geometryType",
+              "value": "esriGeometryPoint"
+            },
+            {
+              "name": "inSR",
+              "value": "4326"
+            },
+            {
+              "name": "spatialRel",
+              "value": "esriSpatialRelIntersects"
+            },
+            {
+              "name": "outFields",
+              "value": "BPEJ,TO_ZPF,KOD_KR,KlimRegion,Skeletovit,Sklon,SklStupne,Expozice,Hloubka,KOD_HPJ,PT_NAZEV"
+            },
+            {
+              "name": "returnGeometry",
+              "value": "false"
+            },
+            {
+              "name": "f",
+              "value": "json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "90151a79-e88c-41a1-9083-b3628c67b8e5",
+      "name": "🌾 BPEJ HTTP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        624,
+        896
+      ],
+      "alwaysOutputData": true,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/0/query",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "where",
+              "value": "={{ $('Příprava pro API').item.json.ma_parcely && $('🗺️ RÚIAN KÚ HTTP').item.json.features && $('🗺️ RÚIAN KÚ HTTP').item.json.features.length > 0 ? 'katastralniuzemi=' + $('🗺️ RÚIAN KÚ HTTP').item.json.features[0].attributes.kod + ' AND cisloparcely IN (' + $('Příprava pro API').item.json.parcely_sql + ')' : '1=1' }}"
+            },
+            {
+              "name": "geometry",
+              "value": "={{ $('Příprava pro API').item.json.ma_parcely ? '' : $('Příprava pro API').item.json.gps_arcgis }}"
+            },
+            {
+              "name": "geometryType",
+              "value": "esriGeometryPoint"
+            },
+            {
+              "name": "inSR",
+              "value": "4326"
+            },
+            {
+              "name": "spatialRel",
+              "value": "esriSpatialRelIntersects"
+            },
+            {
+              "name": "outFields",
+              "value": "cisloparcely,druhpozemkukod,zpusobyvyuzitipozemku,vymeraparcely,katastralniuzemi"
+            },
+            {
+              "name": "returnGeometry",
+              "value": "true"
+            },
+            {
+              "name": "outSR",
+              "value": "4326"
+            },
+            {
+              "name": "f",
+              "value": "json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "79c18a8b-d377-48fe-a4ea-aa245f63f793",
+      "name": "🗺️ RÚIAN Parcely HTTP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        176,
+        992
+      ],
+      "alwaysOutputData": true,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "Analyzuj tento pozemek a vrať JSON hodnocení:\n\n═══════════════════════════════════════════════════════════════════════════════\n📊 KVALITA DAT: {{ $json.data_kvalita }}\n═══════════════════════════════════════════════════════════════════════════════\n\n🔷 ZÁKLADNÍ INFO:\n• Hash ID: {{ $json.hash_id }}\n• Název: {{ $json.nazev }}\n• Lokalita: {{ $json.lokalita }}\n• URL: {{ $json.url }}\n• Cena: {{ $json.cena_czk }} Kč\n• Cena/m²: {{ $json.cena_m2 }} Kč\n\n🔷 LOKALIZACE:\n• KÚ: {{ $json.ku_nazev }} (kód: {{ $json.ku_kod }})\n• GPS původní: {{ $json.gps_original }}\n• GPS ArcGIS: {{ $json.gps_arcgis }}\n• GPS parcely: {{ $json.gps_parcela }}\n• LAT: {{ $json.gps_lat }}\n• LON: {{ $json.gps_lon }}\n\n🔷 PARCELY ({{ $json.parcely_pocet }} ks):\n• Seznam: {{ $json.parcely }}\n• Výměra RÚIAN: {{ $json.vymera_m2 }} m²\n• Výměra inzerát: {{ $json.vymera_inzerat }} m²\n• LV: {{ $json.lv }}\n\n🔷 DRUH A VYUŽITÍ:\n• Druh: {{ $json.druh_pozemku }}\n• Využití: {{ $json.zpusob_vyuziti }}\n\n🔷 BPEJ (bonita půdy):\n• Kód: {{ $json.bpej_kod }}\n• Třída ZPF: {{ $json.bpej_trida }}\n• Sklon: {{ $json.bpej_sklon }}\n• Expozice: {{ $json.bpej_expozice }}\n• Popis: {{ $json.bpej_popis }}\n\n🔷 FVE POTENCIÁL (PVGIS):\n• Výroba: {{ $json.fve_vyroba_kwh }} kWh/kWp\n• Ozáření: {{ $json.fve_ozareni }} kWh/m²\n• Sklon: {{ $json.fve_sklon }}°\n• Azimut: {{ $json.fve_azimut }}°\n\n🔷 POPIS INZERÁTU:\n{{ $json.popis_text }}\n\n🔷 METADATA:\n• Zdroje: {{ $json.zdroje_dat }}\n• Kvalita: {{ $json.data_kvalita }}\n\n═══════════════════════════════════════════════════════════════════════════════\nVRAŤ POUZE TENTO JSON (vyplň hodnoty označené VYPLŇ):\n═══════════════════════════════════════════════════════════════════════════════\n\n{\n  \"id_hash\": \"{{ $json.hash_id }}\",\n  \"nazev\": \"{{ $json.nazev }}\",\n  \"lokalita\": \"{{ $json.lokalita }}\",\n  \"url\": \"{{ $json.url }}\",\n  \"cena_czk\": {{ $json.cena_czk || 0 }},\n  \"cena_m2\": {{ $json.cena_m2 || 0 }},\n  \"vymera_inzerat_m2\": {{ $json.vymera_inzerat || 0 }},\n  \"vymera_ruian_m2\": {{ $json.vymera_m2 || 0 }},\n  \"gps_lon_lat\": \"{{ $json.gps_parcela || $json.gps_arcgis }}\",\n  \"katastralni_uzemi\": \"{{ $json.ku_nazev }}\",\n  \"ku_kod\": \"{{ $json.ku_kod }}\",\n  \"parcely\": \"{{ $json.parcely }}\",\n  \"pocet_parcel\": {{ $json.parcely_pocet || 0 }},\n  \"listy_vlastnictvi\": \"{{ $json.lv }}\",\n  \"druh_pozemku\": \"{{ $json.druh_pozemku }}\",\n  \"zpusob_vyuziti\": \"{{ $json.zpusob_vyuziti }}\",\n  \"bpej_kod\": \"{{ $json.bpej_kod }}\",\n  \"bpej_sklonitost\": \"{{ $json.bpej_sklon }}\",\n  \"bpej_orientace\": \"{{ $json.bpej_expozice }}\",\n  \"trida_zpf\": \"{{ $json.bpej_trida }}\",\n  \"popis_pudy\": \"{{ $json.bpej_popis }}\",\n  \"fve_rocni_vyroba_kwh_kwp\": {{ $json.fve_vyroba_kwh || 0 }},\n  \"fve_rocni_ozareni_kwh_m2\": {{ $json.fve_ozareni || 0 }},\n  \"fve_optimalny_sklon\": {{ $json.fve_sklon || 0 }},\n  \"fve_optimalny_azimut\": {{ $json.fve_azimut || 0 }},\n  \"rating_stavebni\": VYPLŇ_ČÍSLO_0-100,\n  \"rating_fve\": VYPLŇ_ČÍSLO_0-100,\n  \"rating_mve\": VYPLŇ_ČÍSLO_0-100,\n  \"doporucene_vyuziti\": \"VYPLŇ_JEDNO: STAVBA / FVE / ZEMĚDĚLSTVÍ / LES / SPEKULACE / REKREACE\",\n  \"hlavni_vyhoda\": \"VYPLŇ_MAX_50_ZNAKŮ\",\n  \"hlavni_bariera\": \"VYPLŇ_MAX_50_ZNAKŮ\",\n  \"analyza_text\": \"VYPLŇ_2-3_VĚTY_ANALÝZY\",\n  \"zdroje_dat\": \"{{ $json.zdroje_dat }}\",\n  \"data_kvalita\": \"{{ $json.data_kvalita }}\"\n}",
+        "options": {
+          "systemMessage": "Jsi expert na investiční analýzu pozemků v České republice.\n\n═══════════════════════════════════════════════════════════════════════════════\nTVOJE ROLE\n═══════════════════════════════════════════════════════════════════════════════\n- Analyzuješ pozemky z hlediska investičního potenciálu\n- Hodnotíš vhodnost pro: stavbu, fotovoltaiku (FVE), malou vodní elektrárnu (MVE)\n- Pracuješ s daty z RÚIAN, BPEJ (LPIS) a PVGIS\n\n═══════════════════════════════════════════════════════════════════════════════\nKVALITA DAT - ROZHODOVACÍ LOGIKA\n═══════════════════════════════════════════════════════════════════════════════\n• A_PARCELY_PRESNE = Data z parcel uvedených v inzerátu → NEJSPOLEHLIVĚJŠÍ\n• B_GPS_PARCELA = Data z parcely na GPS souřadnici → SPOLEHLIVÉ\n• C_POUZE_KU = Pouze katastrální území → NEKOMPLETNÍ\n• D_GPS_ONLY = Pouze GPS, žádná RÚIAN data → NEKOMPLETNÍ\n\nPRAVIDLO:\n→ Pokud data_kvalita = A nebo B → MÁŠ KOMPLETNÍ DATA → NEVOLEJ API!\n→ Pokud data_kvalita = C nebo D → MŮŽEŠ použít HTTP_API_Tool pro doplnění\n\n═══════════════════════════════════════════════════════════════════════════════\nZÁKLADNÍ PRAVIDLA\n═══════════════════════════════════════════════════════════════════════════════\n1. Používej POUZE data která dostaneš - NEVYMÝŠLEJ si!\n2. Výměru NESČÍTEJ - už je sečtená v poli vymera_m2\n3. Cenu za m² NEPOČÍTEJ - už je spočítaná v poli cena_m2\n4. Vždy vrať ČISTÝ JSON bez markdown bloků (bez ```json)\n5. Žádný text před ani za JSON!\n\nBPEJ - DŮLEŽITÉ\n═══════════════════════════════════════════════════════════════════════════════\n- Pokud bpej_kod = \"NEMÁ (není ZPF)\" → pozemek NENÍ zemědělská půda (les, vodní plocha, zastavěná, ostatní)\n  → NEDOHLEDÁVEJ BPEJ přes API, není to chyba, tento typ pozemku BPEJ nemá\n  → Pro FVE rating: Nepřítomnost BPEJ u lesa/vodní plochy je VÝHODA (nemusí se vyjímat ze ZPF)\n  \n- Pokud bpej_kod = \"NENÍ V LPIS\" → měla by být zemědělská půda ale není v databázi\n  → Možná chyba GPS nebo nová parcela\n  → MŮŽEŠ zkusit dohledat přes API pokud máš GPS\n\n═══════════════════════════════════════════════════════════════════════════════\nHODNOCENÍ STAVEBNÍ (0-100)\n═══════════════════════════════════════════════════════════════════════════════\nBONUS body:\n+ Druh \"zastavěná plocha\" nebo \"zahrada\" = +30\n+ Druh \"ostatní plocha\" = +20\n+ Zmínka o sítích v popisu = +15\n+ Zmínka o přístupu/komunikaci = +10\n+ Zmínka o územním plánu = +10\n+ Malá výměra (< 2000 m²) = +10\n\nMALUS body:\n- Druh \"orná půda\" = -20\n- Druh \"lesní pozemek\" = -30\n- Druh \"vodní plocha\" = -40\n- BPEJ třída I-II (chráněná půda) = -15\n- Bez přístupu = -20\n\n═══════════════════════════════════════════════════════════════════════════════\nHODNOCENÍ FVE (0-100)\n═══════════════════════════════════════════════════════════════════════════════\nBONUS body:\n+ BPEJ třída III = +10\n+ BPEJ třída IV = +20\n+ BPEJ třída V = +30\n+ BPEJ \"NENÍ V LPIS\" (možná není ZPF) = +25\n+ Expozice J (jih) = +15\n+ Expozice JV nebo JZ = +10\n+ Sklon \"rovina 0-3°\" = +15\n+ Sklon \"mírný 3-7°\" = +10\n+ PVGIS výroba > 1100 kWh/kWp = +10\n+ PVGIS výroba > 1150 kWh/kWp = +15\n+ Výměra > 5000 m² = +10\n+ Výměra > 10000 m² = +20\n+ Výměra > 20000 m² = +25\n\nMALUS body:\n- BPEJ třída I = -30 (vysoce chráněná půda)\n- BPEJ třída II = -20 (chráněná půda)\n- Expozice S (sever) = -20\n- Expozice SV nebo SZ = -10\n- Sklon \"prudký >17°\" = -20\n- Sklon \"výrazný 12-17°\" = -10\n- Druh \"lesní pozemek\" = -30\n- Druh \"vodní plocha\" = -40\n- Výměra < 1000 m² = -20\n\n═══════════════════════════════════════════════════════════════════════════════\nHODNOCENÍ MVE (0-100)\n═══════════════════════════════════════════════════════════════════════════════\nBONUS body:\n+ Druh \"vodní plocha\" = +40\n+ Zmínka o vodním toku/potoku/řece v popisu = +30\n+ Zmínka o jezu/náhonu = +20\n+ Výrazný sklon terénu = +10\n\nVÝCHOZÍ: Pokud není vodní tok → rating_mve = 5-15\n\n═══════════════════════════════════════════════════════════════════════════════\nDOPORUČENÉ VYUŽITÍ\n═══════════════════════════════════════════════════════════════════════════════\nVyber JEDNO hlavní doporučení podle nejvyššího ratingu:\n• \"STAVBA\" - pokud rating_stavebni > 60\n• \"FVE\" - pokud rating_fve > 60 a výměra > 3000 m²\n• \"ZEMĚDĚLSTVÍ\" - pokud BPEJ třída I-II a druh orná/TTP\n• \"LES\" - pokud druh lesní pozemek\n• \"SPEKULACE\" - pokud žádné z výše, ale nízká cena/m²\n• \"REKREACE\" - pokud hezká lokalita, menší výměra\n\n═══════════════════════════════════════════════════════════════════════════════\nFORMÁT VÝSTUPU\n═══════════════════════════════════════════════════════════════════════════════\nVrať POUZE JEDEN ČISTÝ JSON objekt.\n- Žádný markdown (bez ```json)\n- Žádný text před JSON\n- Žádný text za JSON\n- Pouze validní JSON"
+        }
+      },
+      "id": "9a3825e6-0e1a-4c1a-96c1-655c4da62d8c",
+      "name": "🏞️ Pozemkový Analytik v6",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [
+        -624,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [
+        848,
+        992
+      ],
+      "id": "e5f39989-1327-4685-9840-3ac79b8a527e",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "url": "https://re.jrc.ec.europa.eu/api/v5_3/PVcalc",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "lat",
+              "value": "={{ $('📍 Parcela GPS Extractor').item.json.gps_parcela.split(',')[1] }}"
+            },
+            {
+              "name": "lon",
+              "value": "={{ $('📍 Parcela GPS Extractor').item.json.gps_parcela.split(',')[0] }}"
+            },
+            {
+              "name": "peakpower",
+              "value": "1"
+            },
+            {
+              "name": "loss",
+              "value": "14"
+            },
+            {
+              "name": "outputformat",
+              "value": "json"
+            },
+            {
+              "name": "optimalangles",
+              "value": "1"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "579accd5-6347-4d3e-8869-7357f35d7ce1",
+      "name": "☀️ PVGIS HTTP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        624,
+        1088
+      ],
+      "alwaysOutputData": true,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "url": "https://ags.cuzk.cz/arcgis/rest/services/RUIAN/Prohlizeci_sluzba_nad_daty_RUIAN/MapServer/7/query",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "geometry",
+              "value": "={{ $json.gps_arcgis }}"
+            },
+            {
+              "name": "geometryType",
+              "value": "esriGeometryPoint"
+            },
+            {
+              "name": "inSR",
+              "value": "4326"
+            },
+            {
+              "name": "spatialRel",
+              "value": "esriSpatialRelIntersects"
+            },
+            {
+              "name": "outFields",
+              "value": "nazev,kod"
+            },
+            {
+              "name": "returnGeometry",
+              "value": "false"
+            },
+            {
+              "name": "f",
+              "value": "json"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "14e180ca-2c41-4e99-85bf-5ef5be0c623f",
+      "name": "🗺️ RÚIAN KÚ HTTP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -48,
+        992
+      ],
+      "alwaysOutputData": true,
+      "continueOnFail": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════════════════════\n// VÝSTUPNÍ PARSER v7 - S PREFIXY PODLE ZDROJE DAT\n// ═══════════════════════════════════════════════════════════════════════════════\n// Prefixy:\n//   ✓ = Ověřená data (RÚIAN, BPEJ, PVGIS)\n//   ◉ = Data z inzerátu\n//   ⚙ = Vypočítaná data\n//   ⚡ = Data od AI\n//   ✗ = Chybí / neověřeno\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst input = $input.first().json;\n\n// Získat původní data z loop nodu (pro fallback)\nlet loopItem = {};\ntry {\n  loopItem = $('🔄 Pozemek Loop').first().json || {};\n} catch (e) {\n  try {\n    loopItem = $('Pozemek Loop').first().json || {};\n  } catch (e2) {\n    console.log('⚠️ Loop item nenalezen');\n  }\n}\n\nlet dataAgg = {};\ntry {\n  dataAgg = $('📊 Data Aggregator').first().json || {};\n} catch (e) {}\n\nlet results = [];\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// PARSOVÁNÍ JSON Z AI\n// ═══════════════════════════════════════════════════════════════════════════════\n\ntry {\n  let text = input.output || input.text || input.response || input.message?.content || '';\n  \n  if (typeof text === 'object') {\n    text = JSON.stringify(text);\n  }\n  \n  text = text.replace(/```json\\s*/gi, '').replace(/```\\s*/gi, '').trim();\n  \n  const arrayMatch = text.match(/\\[[\\s\\S]*\\]/);\n  if (arrayMatch) {\n    results = JSON.parse(arrayMatch[0]);\n  } else {\n    const objMatch = text.match(/\\{[\\s\\S]*\\}/);\n    if (objMatch) {\n      results = [JSON.parse(objMatch[0])];\n    }\n  }\n  \n  console.log('✓ Parsed', results.length, 'results from AI');\n  \n} catch (e) {\n  console.log('✗ Parse error:', e.message);\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// FALLBACK - pokud AI nevrátila validní JSON\n// ═══════════════════════════════════════════════════════════════════════════════\n\nif (!results || results.length === 0) {\n  console.log('⚠️ Using fallback data');\n  results = [{\n    id_hash: loopItem.hash_id || '',\n    nazev: loopItem.nazev || '',\n    lokalita: loopItem.lokalita || '',\n    url: loopItem.url || '',\n    cena_czk: loopItem.cena_czk || 0,\n    cena_m2: loopItem.cena_m2 || 0,\n    vymera_inzerat_m2: loopItem.vymera_inzerat || 0,\n    vymera_ruian_m2: loopItem.vymera_m2 || 0,\n    gps_lon_lat: loopItem.gps_parcela || loopItem.gps_arcgis || '',\n    katastralni_uzemi: loopItem.ku_nazev || '',\n    ku_kod: loopItem.ku_kod || '',\n    parcely: loopItem.parcely || '',\n    pocet_parcel: loopItem.parcely_pocet || 0,\n    listy_vlastnictvi: loopItem.lv || '',\n    druh_pozemku: loopItem.druh_pozemku || '',\n    zpusob_vyuziti: loopItem.zpusob_vyuziti || '',\n    bpej_kod: loopItem.bpej_kod || '',\n    trida_zpf: loopItem.bpej_trida || '',\n    bpej_sklonitost: loopItem.bpej_sklon || '',\n    bpej_orientace: loopItem.bpej_expozice || '',\n    popis_pudy: loopItem.bpej_popis || '',\n    fve_rocni_vyroba_kwh_kwp: loopItem.fve_vyroba_kwh || 0,\n    fve_rocni_ozareni_kwh_m2: loopItem.fve_ozareni || 0,\n    fve_optimalny_sklon: loopItem.fve_sklon || 0,\n    fve_optimalny_azimut: loopItem.fve_azimut || 0,\n    rating_stavebni: 0,\n    rating_fve: 0,\n    rating_mve: 0,\n    doporucene_vyuziti: '',\n    hlavni_vyhoda: '',\n    hlavni_bariera: '',\n    analyza_text: '',\n    zdroje_dat: loopItem.zdroje_dat || '',\n    data_kvalita: loopItem.data_kvalita || 'D_GPS_ONLY'\n  }];\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// POMOCNÉ FUNKCE - PREFIXY\n// ═══════════════════════════════════════════════════════════════════════════════\n\n// ✓ = Ověřená data (RÚIAN, BPEJ, PVGIS)\n// ◉ = Data z inzerátu\n// ⚙ = Vypočítaná data\n// ⚡ = Data od AI\n// ✗ = Chybí\n\nfunction p_overeno(val) {\n  if (val === null || val === undefined || val === '' || val === 0 || val === '-') return '✗ -';\n  return '✓ ' + val;\n}\n\nfunction p_inzerat(val) {\n  if (val === null || val === undefined || val === '' || val === 0 || val === '-') return '✗ -';\n  return '◉ ' + val;\n}\n\nfunction p_vypocet(val) {\n  if (val === null || val === undefined || val === '' || val === 0 || val === '-') return '✗ -';\n  return '⚙ ' + val;\n}\n\nfunction p_ai(val) {\n  if (val === null || val === undefined || val === '' || val === 0 || val === '-') return '✗ -';\n  return '⚡ ' + val;\n}\n\nfunction p_auto(val, zdroj) {\n  // zdroj: 'ruian', 'bpej', 'pvgis', 'inzerat', 'vypocet', 'ai'\n  if (val === null || val === undefined || val === '' || val === 0 || val === '-') return '✗ -';\n  \n  switch(zdroj) {\n    case 'ruian':\n    case 'bpej':\n    case 'pvgis':\n      return '✓ ' + val;\n    case 'inzerat':\n      return '◉ ' + val;\n    case 'vypocet':\n      return '⚙ ' + val;\n    case 'ai':\n      return '⚡ ' + val;\n    default:\n      return '◉ ' + val;\n  }\n}\n\nfunction getVerdikt(rating) {\n  const r = parseInt(rating) || 0;\n  if (r >= 75) return '⭐⭐⭐ VYNIKAJÍCÍ';\n  if (r >= 50) return '⭐⭐ DOBRÝ';\n  if (r >= 25) return '⭐ PODMÍNĚNÝ';\n  return '❌ NEVHODNÝ';\n}\n\nfunction kontrolaVymery(vymeraInz, vymeraRuian) {\n  if (!vymeraInz || vymeraInz <= 0) return '✗ CHYBÍ INZERÁT';\n  if (!vymeraRuian || vymeraRuian <= 0) return '✗ CHYBÍ RÚIAN';\n  \n  const rozdil = Math.abs(vymeraInz - vymeraRuian);\n  const procento = Math.round((rozdil / Math.max(vymeraInz, vymeraRuian)) * 100);\n  \n  if (procento <= 5) return '⚙ ✓ OK';\n  if (procento <= 15) return '⚙ ⚠️ ' + procento + '%';\n  return '⚙ ❌ ' + procento + '%';\n}\n\nfunction zkratPopis(text, maxLen = 1000) {\n  if (!text) return '';\n  if (text.length <= maxLen) return text;\n  return text.substring(0, maxLen - 3) + '...';\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// TRANSFORMACE DO VÝSTUPNÍHO FORMÁTU\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('VÝSTUPNÍ PARSER v7 - S PREFIXY');\nconsole.log('  Položek:', results.length);\nconsole.log('═══════════════════════════════════════════════');\n\nreturn results.map((d) => {\n  const vymeraInz = parseInt(d.vymera_inzerat_m2) || 0;\n  const vymeraRuian = parseInt(d.vymera_ruian_m2) || 0;\n  const cena = parseInt(d.cena_czk) || 0;\n  const cenaM2 = parseInt(d.cena_m2) || (vymeraRuian > 0 && cena > 0 ? Math.round(cena / vymeraRuian) : 0);\n  \n  const ratingStavebni = parseInt(d.rating_stavebni) || 0;\n  const ratingFve = parseInt(d.rating_fve) || 0;\n  const ratingMve = parseInt(d.rating_mve) || 0;\n  \n  const hashId = d.id_hash || d.hash_id || '';\n  \n  // Určení zdroje GPS\n  const maGpsParcela = dataAgg.gps_parcela && dataAgg.gps_parcela !== '';\n  const maGpsInzerat = dataAgg.gps_arcgis && dataAgg.gps_arcgis !== '';\n  const gpsHodnota = d.gps_lon_lat || dataAgg.gps_parcela || dataAgg.gps_arcgis || '';\n  const gpsZdroj = maGpsParcela ? 'ruian' : (maGpsInzerat ? 'inzerat' : null);\n  \n  // Určení zdroje výměry\n  const maVymeruRuian = vymeraRuian > 0;\n  \n  // Určení zdroje BPEJ\n  const maBpej = d.bpej_kod && d.bpej_kod !== '' && d.bpej_kod !== 'NENÍ V LPIS';\n  \n  // Určení zdroje FVE\n  const maFve = (d.fve_rocni_vyroba_kwh_kwp || 0) > 0;\n\n  return {\n    json: {\n      // ═══ IDENTIFIKACE (bez prefixu - vždy z inzerátu) ═══\n      'ID [hash]': hashId ? `sr_${hashId}` : '',\n      'Název': d.nazev || '',\n      'Lokalita': d.lokalita || '',\n      'URL': 'https://www.sreality.cz/detail/prodej/pozemek/bydleni/x/' + hashId,\n      \n      // ═══ CENA A VÝMĚRA ═══\n      'Cena [Kč]': p_inzerat(cena),\n      'Cena/m² [Kč]': p_vypocet(cenaM2),\n      'Výměra inzerát [m²]': p_inzerat(vymeraInz),\n      'Výměra RÚIAN [m²]': p_overeno(vymeraRuian),\n      'Kontrola výměry': kontrolaVymery(vymeraInz, vymeraRuian),\n      \n      // ═══ LOKALIZACE ═══\n      'GPS [LON,LAT]': p_auto(gpsHodnota, gpsZdroj),\n      'Katastrální území': p_overeno(d.katastralni_uzemi || ''),\n      'Kód KÚ': p_overeno(d.ku_kod || ''),\n      \n      // ═══ PARCELY ═══\n      'Parcely': maVymeruRuian ? p_overeno(d.parcely || '') : p_inzerat(d.parcely || ''),\n      'Počet parcel': maVymeruRuian ? p_overeno(d.pocet_parcel || '') : p_inzerat(d.pocet_parcel || ''),\n      'LV': p_inzerat(d.listy_vlastnictvi || ''),\n      \n      // ═══ DRUH A VYUŽITÍ ═══\n      'Druh pozemku': maVymeruRuian ? p_overeno(d.druh_pozemku || '') : p_inzerat(d.druh_pozemku || ''),\n      'Způsob využití': maVymeruRuian ? p_overeno(d.zpusob_vyuziti || '') : p_inzerat(d.zpusob_vyuziti || ''),\n      \n// ═══ BPEJ ═══\n'BPEJ kód': d.bpej_kod === 'NEMÁ (není ZPF)' \n  ? '◉ NEMÁ (není ZPF)' \n  : (maBpej ? p_overeno(d.bpej_kod) : '✗ NENÍ V LPIS'),\n'Třída ZPF': d.bpej_kod === 'NEMÁ (není ZPF)' \n  ? '◉ -' \n  : (maBpej ? p_overeno(d.trida_zpf || '') : '✗ -'),\n'BPEJ sklon': d.bpej_kod === 'NEMÁ (není ZPF)' \n  ? '◉ -' \n  : (maBpej ? p_overeno(d.bpej_sklonitost || '') : '✗ -'),\n'BPEJ expozice': d.bpej_kod === 'NEMÁ (není ZPF)' \n  ? '◉ -' \n  : (maBpej ? p_overeno(d.bpej_orientace || '') : '✗ -'),\n'Popis půdy': d.bpej_kod === 'NEMÁ (není ZPF)' \n  ? '◉ -' \n  : (maBpej ? p_overeno(d.popis_pudy || '') : '✗ -'),\n      \n      // ═══ FVE POTENCIÁL ═══\n      'FVE výroba [kWh/kWp]': maFve ? p_overeno(d.fve_rocni_vyroba_kwh_kwp) : '✗ -',\n      'FVE ozáření [kWh/m²]': maFve ? p_overeno(d.fve_rocni_ozareni_kwh_m2 || '') : '✗ -',\n      'FVE sklon [°]': maFve ? p_overeno(d.fve_optimalny_sklon || '') : '✗ -',\n      'FVE azimut [°]': maFve ? p_overeno(d.fve_optimalny_azimut || '') : '✗ -',\n      \n      // ═══ RATINGY (AI) ═══\n      'Rating STAVEBNÍ': p_ai(ratingStavebni),\n      'Verdikt STAVEBNÍ': p_ai(getVerdikt(ratingStavebni)),\n      'Rating FVE': p_ai(ratingFve),\n      'Verdikt FVE': p_ai(getVerdikt(ratingFve)),\n      'Rating MVE': p_ai(ratingMve),\n      'Verdikt MVE': p_ai(getVerdikt(ratingMve)),\n      \n      // ═══ DOPORUČENÍ (AI) ═══\n      'Doporučené využití': p_ai(d.doporucene_vyuziti || ''),\n      'Hlavní výhoda': p_ai(d.hlavni_vyhoda || ''),\n      'Hlavní bariéra': p_ai(d.hlavni_bariera || ''),\n      'Analýza': p_ai(d.analyza_text || ''),\n      \n      // ═══ POPIS (z inzerátu, bez prefixu - příliš dlouhý) ═══\n      'Popis inzerátu': zkratPopis(d.popis_text || loopItem.popis_text || ''),\n      \n      // ═══ METADATA ═══\n      'Datum': new Date().toISOString().split('T')[0],\n      'Čas': new Date().toISOString().split('T')[1].split('.')[0]\n    }\n  };\n});"
+      },
+      "id": "31743b63-0fda-4412-9264-7d56be99c80b",
+      "name": "📊 Výstupní Parser",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -272,
+        576
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════════\n// SREALITY PARSER - FÁZE 1\n// ═══════════════════════════════════════════════════════════════════\n\nconst items = $input.all();\nlet config = {};\n\ntry {\n  const loopData = $('🔄 Sreality Loop').item.json;\n  config = loopData.config || {};\n} catch (e) {\n  console.log('Config z loop nenalezen');\n}\n\nconst results = [];\n\n// KATEGORIE MAP - klíče jako čísla\nconst KATEGORIE_MAP = {\n  19: 'Bydlení',\n  20: 'Komerční',\n  21: 'Pole',\n  22: 'Louky',\n  23: 'Zahrady',\n  24: 'Lesy',\n  25: 'Rybníky',\n  26: 'Sady',\n  27: 'Ostatní'\n};\n\nfor (const item of items) {\n  const data = item.json;\n  const estates = data._embedded?.estates || data.estates || [];\n  \n  if (!Array.isArray(estates)) continue;\n  \n  // Debug prvního estate\n  if (estates.length > 0 && results.length === 0) {\n    const first = estates[0];\n    const seoSubCb = first.seo?.category_sub_cb;\n    console.log(`DEBUG: seo.category_sub_cb = ${seoSubCb} (type: ${typeof seoSubCb})`);\n    console.log(`DEBUG: KATEGORIE_MAP[${seoSubCb}] = ${KATEGORIE_MAP[seoSubCb]}`);\n    console.log(`DEBUG: KATEGORIE_MAP[parseInt(${seoSubCb})] = ${KATEGORIE_MAP[parseInt(seoSubCb)]}`);\n  }\n  \n  let skipped = 0;\n  for (const estate of estates) {\n    // Získat hash_id z různých zdrojů\n    let hashId = estate.hash_id || estate.id;\n    \n    // Zkusit extrahovat z _links.self.href (např. \"/estates/1234567\")\n    if (!hashId && estate._links?.self?.href) {\n      const match = estate._links.self.href.match(/\\/(\\d+)$/);\n      if (match) {\n        hashId = parseInt(match[1]);\n        console.log('ℹ️ ID z _links:', hashId);\n      }\n    }\n    \n    // Zkusit z URI\n    if (!hashId && estate.uri) {\n      const match = estate.uri.match(/\\/(\\d+)$/);\n      if (match) {\n        hashId = parseInt(match[1]);\n        console.log('ℹ️ ID z uri:', hashId);\n      }\n    }\n    \n    // Pokud stále nemáme ID, vyřadit (potřebujeme ho pro Detail API)\n    if (!hashId) {\n      console.log('⚠️ Vyřazeno - bez hash_id:', estate.name?.substring(0, 40));\n      skipped++;\n      continue;\n    }\n    \n    // ═══ CENA ═══\n    let cena = 0;\n    let cenaDuvod = '';\n    \n    if (estate.price_czk?.value_raw) {\n      cena = estate.price_czk.value_raw;\n    } else if (estate.price_czk?.value) {\n      cena = estate.price_czk.value;\n    } else if (typeof estate.price === 'number' && estate.price > 0) {\n      cena = estate.price;\n    }\n    \n    const name = estate.name || '';\n    const priceName = estate.price_czk?.name || '';\n    \n    if (name.toLowerCase().includes('info o ceně') || \n        priceName.toLowerCase().includes('info o ceně')) {\n      cenaDuvod = 'Cena na vyžádání';\n      cena = 0;\n    }\n    \n    // ═══ KATEGORIE - OPRAVA: parseInt pro jistotu! ═══\n    const kategorieKodRaw = estate.seo?.category_sub_cb;\n    const kategorieKod = parseInt(kategorieKodRaw) || 0;\n    const kategorieNazev = KATEGORIE_MAP[kategorieKod] || 'Ostatní';\n    \n    const hasRealId = typeof hashId === 'number' || (typeof hashId === 'string' && !hashId.startsWith('gen_'));\n    \n    results.push({\n      json: {\n        hash_id: hashId,\n        has_real_id: hasRealId,\n        cena: cena,\n        cena_duvod: cenaDuvod,\n        nazev: name,\n        lokalita: estate.locality || '',\n        kategorie_kod: kategorieKod,\n        kategorie: kategorieNazev,\n        config: config\n      }\n    });\n  }\n}\n\n// Statistika kategorií\nconst kategorieStat = {};\nresults.forEach(r => {\n  const k = r.json.kategorie || 'PRÁZDNÁ';\n  kategorieStat[k] = (kategorieStat[k] || 0) + 1;\n});\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('FÁZE 1 VÝSLEDEK:');\nconsole.log('  Zpracováno:', results.length);\nconsole.log('  Kategorie:', JSON.stringify(kategorieStat));\nconsole.log('═══════════════════════════════════════════════');\n\nif (results.length === 0) {\n  return [{ json: { _empty: true, config: config } }];\n}\n\nreturn results;"
+      },
+      "id": "6a686bd4-6d17-4804-a691-16b6e6892c30",
+      "name": "🏠 Sreality Fáze 1",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2192,
+        1280
+      ],
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {},
+      "id": "16b9911e-c8b4-4707-9528-3287505196a1",
+      "name": "🏠 Next Lista",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -1744,
+        1344
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours",
+              "hoursInterval": 24
+            }
+          ]
+        }
+      },
+      "id": "640ed6e5-bed1-4e79-a724-1a1c31673aa6",
+      "name": "⏰ Denní",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -3312,
+        1152
+      ]
+    },
+    {
+      "parameters": {
+        "path": "086bc45b-8bd7-4598-931e-85f884f67157",
+        "formTitle": "🏞️ Pozemkový Agent v51",
+        "formDescription": "Automatická analýza investičních pozemků",
+        "formFields": {
+          "values": [
+            {
+              "fieldLabel": "💰 Max cena (Kč)",
+              "fieldType": "number",
+              "placeholder": "2000000",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "📐 Min výměra (m²)",
+              "fieldType": "number",
+              "placeholder": "500"
+            },
+            {
+              "fieldLabel": "📄 Max stránek",
+              "fieldType": "number",
+              "placeholder": "3",
+              "requiredField": true
+            },
+            {
+              "fieldLabel": "🔘 Sreality",
+              "fieldType": "checkbox",
+              "defaultValue": "true",
+              "fieldOptions": {
+                "values": [
+                  {}
+                ]
+              }
+            },
+            {
+              "fieldLabel": "💰 Pouze s cenou",
+              "fieldType": "checkbox",
+              "defaultValue": "true",
+              "fieldOptions": {
+                "values": [
+                  {}
+                ]
+              }
+            },
+            {
+              "fieldLabel": "🚫 Vynechat podíly",
+              "fieldType": "checkbox",
+              "defaultValue": "true",
+              "fieldOptions": {
+                "values": [
+                  {}
+                ]
+              }
+            },
+            {
+              "fieldLabel": "⚠️ Vynechat exekuce/dražby",
+              "fieldType": "checkbox",
+              "defaultValue": "true",
+              "fieldOptions": {
+                "values": [
+                  {}
+                ]
+              }
+            },
+            {
+              "fieldLabel": "🏞️ Typy pozemků",
+              "fieldType": "dropdown",
+              "fieldOptions": {
+                "values": [
+                  {
+                    "option": "Orná půda"
+                  },
+                  {
+                    "option": "Louka/TTP"
+                  },
+                  {
+                    "option": "Zahrada"
+                  },
+                  {
+                    "option": "Stavební"
+                  },
+                  {
+                    "option": "Les"
+                  },
+                  {
+                    "option": "Ostatní"
+                  }
+                ]
+              },
+              "multiselect": true
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "6dcf7fc4-6c3f-415d-b141-345c2a3cd400",
+      "name": "📋 Formulář",
+      "type": "n8n-nodes-base.formTrigger",
+      "typeVersion": 2.1,
+      "position": [
+        -3312,
+        1344
+      ],
+      "webhookId": "086bc45b-8bd7-4598-931e-85f884f67157"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════════════════════\n// KONFIGURACE v63 - OPRAVENÁ DETEKCE CHECKBOXŮ\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst input = $input.first().json;\n\n// DEBUG - raw hodnoty z formuláře\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('RAW INPUT Z FORMULÁŘE:');\nconsole.log('  Všechny klíče:', Object.keys(input));\nconsole.log('═══════════════════════════════════════════════');\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// POMOCNÉ FUNKCE\n// ═══════════════════════════════════════════════════════════════════════════════\n\nfunction isChecked(name) {\n    const val = input[name];\n    \n    // Prázdné hodnoty = nezaškrtnuto\n    if (val === undefined || val === null || val === false || val === '') return false;\n    if (val === 'false' || val === '0' || val === 0) return false;\n    \n    // Prázdný objekt {} nebo pole [] = nezaškrtnuto\n    if (typeof val === 'object') {\n      if (Array.isArray(val)) return val.length > 0;\n      return Object.keys(val).length > 0;  // {} má 0 klíčů = false\n    }\n    \n    // Zaškrtnuto\n    if (val === true || val === 'true' || val === 1 || val === '1') return true;\n    if (val === 'on' || val === 'yes') return true;\n    \n    return false;\n}\n\nfunction getNum(name, defaultVal) {\n    let val = input[name];\n    if (typeof val === 'string') {\n        val = val.replace(/[\\s,]/g, '').replace(/\\./g, '');\n    }\n    const num = parseInt(val);\n    return isNaN(num) ? defaultVal : num;\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// TYPY POZEMKŮ\n// ═══════════════════════════════════════════════════════════════════════════════\n\nlet typyPozemku = input['🏞️ Typy pozemků'] || [];\n\nif (typeof typyPozemku === 'string') {\n    typyPozemku = typyPozemku ? [typyPozemku] : [];\n}\n\nif (!typyPozemku || typyPozemku.length === 0) {\n    typyPozemku = ['Orná půda', 'Louka/TTP', 'Zahrada', 'Stavební', 'Les', 'Ostatní'];\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// SESTAVENÍ CONFIGU\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst config = {\n    cena_max: getNum('💰 Max cena (Kč)', 999999999),\n    cena_min: 1001,\n    vymera_min: getNum('📐 Min výměra (m²)', 0),\n    max_pages: getNum('📄 Max stránek', 3),\n    \n    servery: { sreality: true },\n    \n    pouze_s_cenou: isChecked('💰 Pouze s cenou'),\n    vynechat_podily: isChecked('🚫 Vynechat podíly'),\n    vynechat_exekuce: isChecked('⚠️ Vynechat exekuce/dražby'),\n    \n    typy_pozemku: typyPozemku\n};\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// DEBUG\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconsole.log('KONFIGURACE v63:');\nconsole.log('  Max cena:', config.cena_max);\nconsole.log('  Pouze s cenou:', config.pouze_s_cenou ? '✅' : '❌');\nconsole.log('  Vynechat podíly:', config.vynechat_podily ? '✅' : '❌');\nconsole.log('  Vynechat exekuce:', config.vynechat_exekuce ? '✅' : '❌');\n\nreturn [{ json: config }];"
+      },
+      "id": "f89b15e3-a7f4-49bc-adfc-f85b858575c4",
+      "name": "⚙️ Konfigurace",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -3088,
+        1280
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════════\n// SREALITY URLs\n// Veškeré filtrování se dělá LOKÁLNĚ v Pre-Filtru\n// ═══════════════════════════════════════════════════════════════════\nconst config = $input.first().json;\n\n// URL BEZ jakýchkoliv filtrů - stáhne VŠECHNY pozemky\n// category_main_cb=3 = pozemky\n// category_type_cb=1 = prodej\nconst baseUrl = 'https://www.sreality.cz/api/cs/v2/estates?category_main_cb=3&category_type_cb=1&per_page=60';\n\nconst urls = [];\nfor (let page = 1; page <= config.max_pages; page++) {\n  urls.push({\n    page: page,\n    url: baseUrl + '&page=' + page,\n    config: config\n  });\n}\n\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('SREALITY URLs v60:');\nconsole.log('  Stránek:', config.max_pages);\nconsole.log('  URL:', urls[0]?.url);\nconsole.log('  (Cenový filtr je v Pre-Filtru, NE v URL)');\nconsole.log('═══════════════════════════════════════════════');\n\nreturn urls.map(u => ({ json: u }));"
+      },
+      "id": "ff4c63a2-39cd-4609-80cb-a2c105e404a6",
+      "name": "🏠 Sreality URLs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2864,
+        1280
+      ]
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "65948bcf-9e0c-4743-99b2-2b81a8f0bcee",
+      "name": "🔄 Sreality Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -2640,
+        1280
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.url }}",
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "json"
+            }
+          },
+          "timeout": 60000
+        }
+      },
+      "id": "64d2ce48-a5cd-46cb-8904-3671c833b347",
+      "name": "🏠 Sreality HTTP",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -2416,
+        1280
+      ],
+      "alwaysOutputData": true,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// ═══════════════════════════════════════════════════════════════════════════════\n// PRE-FILTR\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconst items = $input.all();\nconst results = [];\n\n// Načíst config\nlet cfg = {};\ntry {\n  cfg = $('⚙️ Konfigurace').first().json;\n} catch (e) {\n  cfg = items[0]?.json?.config || {};\n}\n\n// Konfigurace\nconst maxCena = cfg.cena_max || 999999999;\nconst minCena = cfg.cena_min || 1001;  // Čte z configu, default 1001\nconst pouzeSCenou = cfg.pouze_s_cenou === true;\nconst vynechatPodily = cfg.vynechat_podily === true;\nconst vynechatExekuce = cfg.vynechat_exekuce === true;\nconst typyPozemku = cfg.typy_pozemku || [];\n\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('PRE-FILTR v4:');\nconsole.log('  Vstup:', items.length);\nconsole.log('  Min cena:', minCena, 'Kč');\nconsole.log('  Max cena:', maxCena === 999999999 ? 'BEZ LIMITU' : maxCena.toLocaleString());\nconsole.log('  Pouze s cenou:', pouzeSCenou);\nconsole.log('  Vynechat podíly:', vynechatPodily);\nconsole.log('  Vynechat exekuce/dražby:', vynechatExekuce);\nconsole.log('  Typy:', typyPozemku.length === 6 ? 'VŠECHNY' : typyPozemku.join(', '));\nconsole.log('═══════════════════════════════════════════════');\n\nlet stats = { celkem: 0, typ: 0, podil: 0, exekuce: 0, bezCeny: 0, nadLimit: 0, podLimit: 0, ok: 0 };\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// POMOCNÉ FUNKCE\n// ═══════════════════════════════════════════════════════════════════════════════\n\nfunction getTypPozemku(nazev) {\n  const n = (nazev || '').toLowerCase();\n  if (n.includes('stavební') || n.includes('k bydlení')) return 'Stavební';\n  if (n.includes('pole ') || n.includes('orné') || n.includes('orná')) return 'Orná půda';\n  if (n.includes('louk') || n.includes('pastvina') || n.includes('travní')) return 'Louka/TTP';\n  if (n.includes('zahrad')) return 'Zahrada';\n  if (n.includes('les') || n.includes('lesní')) return 'Les';\n  if (n.includes('komerční') || n.includes('průmysl')) return 'Stavební';\n  return 'Ostatní';\n}\n\nfunction jePodil(nazev, popis) {\n  const text = ((nazev || '') + ' ' + (popis || '')).toLowerCase();\n  // 100% podíl = OK, není to spoluvlastnictví\n  if (/100\\s*%/.test(text)) return false;\n  // Hledáme: spoluvlastnictví, ideální podíl, 1/2, 1/4, atd.\n  return text.includes('spoluvlast') || \n         /ideální.*podíl/.test(text) || \n         /podíl.*ideální/.test(text) ||\n         /\\d+\\/\\d+/.test(text) ||\n         text.includes('podíl na pozemku');\n}\n\nfunction jeExekuce(nazev, popis) {\n  const text = ((nazev || '') + ' ' + (popis || '')).toLowerCase();\n  // Hledáme: exekuce, dražba, insolvence, nucený prodej\n  return text.includes('exekuce') || \n         text.includes('exekuč') ||\n         text.includes('dražba') || \n         text.includes('dražeb') ||\n         text.includes('insolvence') || \n         text.includes('insolvenč') ||\n         text.includes('nucený prodej') ||\n         text.includes('veřejná soutěž') ||\n         text.includes('konkurz') ||\n         text.includes('likvidace');\n}\n\nfunction jeSymbolickaCena(cena, nazev) {\n  // Cena <= 1000 = symbolická (info o ceně u RK)\n  if (cena > 0 && cena <= 1000) return true;\n  const n = (nazev || '').toLowerCase();\n  return n.includes('info o ceně') || \n         n.includes('cena na vyžádání') || \n         n.includes('cena u rk') ||\n         n.includes('cena v rk');\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// HLAVNÍ FILTRAČNÍ SMYČKA\n// ═══════════════════════════════════════════════════════════════════════════════\n\nfor (const item of items) {\n  const d = item.json;\n  \n  if (!d || d._empty) continue;\n  \n  stats.celkem++;\n  const nazev = d.nazev || '';\n  const popis = d.popis || d.description || '';\n  const cena = d.cena || 0;\n  \n  // ─────────────────────────────────────────────────────────────────────────────\n  // 1. TYPOVÝ FILTR\n  // ─────────────────────────────────────────────────────────────────────────────\n  if (typyPozemku.length > 0 && typyPozemku.length < 6) {\n    const typ = getTypPozemku(nazev);\n    if (!typyPozemku.includes(typ)) {\n      stats.typ++;\n      continue;\n    }\n  }\n  \n  // ─────────────────────────────────────────────────────────────────────────────\n  // 2. FILTR PODÍLŮ (kontroluje název I popis)\n  // ─────────────────────────────────────────────────────────────────────────────\n  if (vynechatPodily && jePodil(nazev, popis)) {\n    stats.podil++;\n    console.log(`❌ Podíl: ${nazev.substring(0,50)}`);\n    continue;\n  }\n  \n  // ─────────────────────────────────────────────────────────────────────────────\n  // 3. FILTR EXEKUCÍ/DRAŽEB (kontroluje název I popis)\n  // ─────────────────────────────────────────────────────────────────────────────\n  if (vynechatExekuce && jeExekuce(nazev, popis)) {\n    stats.exekuce++;\n    console.log(`❌ Exekuce/dražba: ${nazev.substring(0,50)}`);\n    continue;\n  }\n  \n  // ─────────────────────────────────────────────────────────────────────────────\n  // 4. FILTR CENY - symbolické a pod minimem\n  // ─────────────────────────────────────────────────────────────────────────────\n  if (pouzeSCenou) {\n    // 4a. Bez ceny nebo symbolická cena\n    if (cena <= 0 || jeSymbolickaCena(cena, nazev)) {\n      stats.bezCeny++;\n      console.log(`❌ Bez ceny/symbolická (${cena}): ${nazev.substring(0,50)}`);\n      continue;\n    }\n    // 4b. Pod minimální reálnou cenou\n    if (cena < minCena) {\n      stats.podLimit++;\n      console.log(`❌ Pod min cenou (${cena} < ${minCena}): ${nazev.substring(0,50)}`);\n      continue;\n    }\n  }\n  \n  // ─────────────────────────────────────────────────────────────────────────────\n  // 5. FILTR MAX CENY\n  // ─────────────────────────────────────────────────────────────────────────────\n  if (cena > 0 && maxCena < 999999999 && cena > maxCena) {\n    stats.nadLimit++;\n    continue;\n  }\n  \n  // ─────────────────────────────────────────────────────────────────────────────\n  // ✅ PROŠLO VŠEMI FILTRY\n  // ─────────────────────────────────────────────────────────────────────────────\n  stats.ok++;\n  results.push(item);\n}\n\n// ═══════════════════════════════════════════════════════════════════════════════\n// VÝSTUP\n// ═══════════════════════════════════════════════════════════════════════════════\n\nconsole.log('═══════════════════════════════════════════════');\nconsole.log('VÝSLEDKY:');\nconsole.log('  Celkem:', stats.celkem);\nconsole.log('  Vyřazeno typ:', stats.typ);\nconsole.log('  Vyřazeno podíl:', stats.podil);\nconsole.log('  Vyřazeno exekuce/dražba:', stats.exekuce);\nconsole.log('  Vyřazeno bez ceny:', stats.bezCeny);\nconsole.log('  Vyřazeno pod min cenou:', stats.podLimit);\nconsole.log('  Vyřazeno nad max cenou:', stats.nadLimit);\nconsole.log('  ✅ PROŠLO:', stats.ok);\nconsole.log('═══════════════════════════════════════════════');\n\nif (results.length === 0) {\n  return [{ json: { _no_results: true, _iteration: true } }];\n}\nreturn results;"
+      },
+      "id": "1dc8a5ee-bf5b-487e-a872-a0a96d0b79e6",
+      "name": "💰 Cenový Pre-Filtr",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1968,
+        1280
+      ]
+    },
+    {
+      "parameters": {
+        "projectId": {
+          "__rl": true,
+          "mode": "list",
+          "value": "gen-lang-client-0737675877"
+        },
+        "options": {
+          "temperature": 0.1
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleVertex",
+      "typeVersion": 1,
+      "position": [
+        -624,
+        800
+      ],
+      "id": "e0cb849e-3d9f-4b1e-aeda-cda2e85c465e",
+      "name": "Gemini 2.5 Flash",
+      "retryOnFail": true,
+      "waitBetweenTries": 3000,
+      "maxTries": 2,
+      "credentials": {
+        "googleApi": {
+          "id": "KGzAAuQ37otupHhs",
+          "name": "Google Service Account account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "be973f78-dbe6-4568-bcad-ca9dc0d61930",
+      "name": "➡️ Next Pozemek",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        176,
+        688
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "5b25fe98-71ed-4bfb-8029-4a7fd780025f",
+      "name": "📭 Žádné k analýze",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -848,
+        768
+      ]
+    },
+    {
+      "parameters": {
+        "options": {
+          "reset": false
+        }
+      },
+      "id": "009ae284-b557-4836-9e64-e897610ecd3f",
+      "name": "🔄 Pozemek Loop",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [
+        -848,
+        432
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "has-items",
+              "leftValue": "={{ $json._empty }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "f0c88998-1b0b-4d50-a0bf-703c3e2fb80f",
+      "name": "❓ Jsou pozemky?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        -1072,
+        608
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst seen = new Set();\nconst results = [];\n\nfor (const item of items) {\n  const d = item.json;\n  if (!d || d._empty) continue;\n  \n  const hashId = d.hash_id;\n  if (!hashId) continue;\n  if (seen.has(hashId)) continue;\n  seen.add(hashId);\n  \n  results.push(item);\n}\n\nconsole.log(`Hash Sběrač: ${items.length} -> ${results.length} unikátních`);\nif (results.length === 0) {\n  return [{ json: { _empty: true, _server: 'sreality' } }];\n}\nreturn results;"
+      },
+      "id": "e9370424-bb91-4807-be9e-4bad08dc4919",
+      "name": "📦 Hash Sběrač",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2416,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "1b2WRbLg8eI2l7xTT6qhtKXTevi9FjnOLyAmx80Zy9WI",
+          "mode": "list",
+          "cachedResultName": "Pozemkový agent",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/1b2WRbLg8eI2l7xTT6qhtKXTevi9FjnOLyAmx80Zy9WI/edit"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Hlavní přehled"
+        },
+        "options": {}
+      },
+      "id": "c21aa5d4-1bb1-498e-8ba2-be81f42687b9",
+      "name": "📊 Načíst Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -1968,
+        1088
+      ],
+      "alwaysOutputData": true,
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "RAU9mUN1AEbXa8XU",
+          "name": "Google Sheets account"
+        }
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "parameters": {
+        "jsCode": "// NAJÍT NOVÉ\nlet sheetData = [];\ntry {\n  sheetData = $input.all().filter(i => i.json && !i.json._empty);\n} catch (e) {}\n\nlet filtered = [];\ntry {\n  filtered = $('📦 Filtr + Dedup').all().filter(i => i.json && !i.json._empty);\n} catch (e) {}\n\nif (filtered.length === 0) {\n  return [{ json: { _empty: true, _reason: 'no_scraped_data' } }];\n}\n\nconst existingKeys = new Set();\nfor (const item of sheetData) {\n  const j = item.json;\n  if (j.ID) existingKeys.add(j.ID);\n  if (j.hash_id) existingKeys.add(`sr_${j.hash_id}`);\n  if (j.Odkaz) existingKeys.add(j.Odkaz);\n  if (j['ID [hash]']) existingKeys.add(j['ID [hash]']);\n}\n\nconst newItems = [];\nfor (const item of filtered) {\n  const j = item.json;\n  if (!j || j._empty) continue;\n  const key = j.dedup_key || (j.hash_id ? `sr_${j.hash_id}` : j.url);\n  if (key && existingKeys.has(key)) continue;\n  if (j.url && existingKeys.has(j.url)) continue;\n  newItems.push({ json: j });\n}\n\nreturn newItems.length > 0 ? newItems : [{ json: { _empty: true, _reason: 'no_new_items' } }];"
+      },
+      "id": "ea695a05-69ab-4740-8906-ff7feaaf6346",
+      "name": "🆕 Najít Nové",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -1744,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "has-new",
+              "leftValue": "={{ $json._empty }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "268f2441-07c7-4f5e-b2fa-f27e0496f899",
+      "name": "❓ Jsou nové?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -1520,
+        1088
+      ]
+    },
+    {
+      "parameters": {},
+      "id": "276a5ab8-fb62-4a49-80c4-f8481e6341b3",
+      "name": "📭 Žádné nové",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -1296,
+        1088
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "1b2WRbLg8eI2l7xTT6qhtKXTevi9FjnOLyAmx80Zy9WI",
+          "mode": "list",
+          "cachedResultName": "Pozemkový agent"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": "gid=0",
+          "mode": "list",
+          "cachedResultName": "Hlavní přehled"
+        },
+        "columns": {
+          "mappingMode": "autoMapInputData",
+          "value": {},
+          "matchingColumns": [
+            "_empty"
+          ],
+          "schema": [
+            {
+              "id": "_empty",
+              "displayName": "_empty",
+              "required": false,
+              "defaultMatch": false,
+              "display": true,
+              "type": "string",
+              "canBeUsedToMatch": true,
+              "removed": false
+            }
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "id": "4fda94d7-f4a4-4802-b315-0f01227c7ce9",
+      "name": "📝 Zapsat Sheet",
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.5,
+      "position": [
+        -48,
+        576
+      ],
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "RAU9mUN1AEbXa8XU",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "id": "acd209b1-7ecb-43de-8ec6-908cbd877797",
+      "name": "✅ Hotovo",
+      "type": "n8n-nodes-base.noOp",
+      "typeVersion": 1,
+      "position": [
+        -560,
+        272
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// FILTR + DEDUP\nconst items = $input.all();\nconst seen = new Set();\nconst results = [];\n\nlet minVymera = 0;\ntry {\n  const cfg = $('⚙️ Konfigurace').first().json;\n  minVymera = cfg.vymera_min || 0;\n} catch (e) {}\n\nfor (const item of items) {\n  const d = item.json;\n  if (!d || d._empty || d._error) continue;\n  const key = d.dedup_key || d.url || d.hash_id;\n  if (key && seen.has(key)) continue;\n  if (key) seen.add(key);\n  if (minVymera > 0) {\n    const vymera = d.vymera_m2 || d.vymera || 0;\n    if (vymera > 0 && vymera < minVymera) continue;\n  }\n  results.push(item);\n}\n\nreturn results.length > 0 ? results : [{ json: { _empty: true } }];"
+      },
+      "id": "eba34e3c-6e7c-4464-a47f-cc7ae8f168f7",
+      "name": "📦 Filtr + Dedup",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -2192,
+        1088
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "📍 Parcela GPS Extractor": {
+      "main": [
+        [
+          {
+            "node": "🌾 BPEJ HTTP",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "☀️ PVGIS HTTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Příprava pro API": {
+      "main": [
+        [
+          {
+            "node": "🗺️ RÚIAN KÚ HTTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⏳ API Pauza": {
+      "main": [
+        [
+          {
+            "node": "🏠 Sreality fáze 2",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📊 Data Aggregator": {
+      "main": [
+        [
+          {
+            "node": "🏠 Next Detail",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔄 Sreality Detail Loop": {
+      "main": [
+        [
+          {
+            "node": "❓ Jsou pozemky?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "🏠 Sreality Detail HTTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏠 Sreality Detail HTTP": {
+      "main": [
+        [
+          {
+            "node": "⏳ API Pauza",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏠 Sreality fáze 2": {
+      "main": [
+        [
+          {
+            "node": "Příprava pro API",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏠 Next Detail": {
+      "main": [
+        [
+          {
+            "node": "🔄 Sreality Detail Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🌾 BPEJ HTTP": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🗺️ RÚIAN Parcely HTTP": {
+      "main": [
+        [
+          {
+            "node": "📍 Parcela GPS Extractor",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "HTTP_API_Tool": {
+      "ai_tool": [
+        [
+          {
+            "node": "🏞️ Pozemkový Analytik v6",
+            "type": "ai_tool",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge": {
+      "main": [
+        [
+          {
+            "node": "📊 Data Aggregator",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "☀️ PVGIS HTTP": {
+      "main": [
+        [
+          {
+            "node": "Merge",
+            "type": "main",
+            "index": 1
+          }
+        ]
+      ]
+    },
+    "🗺️ RÚIAN KÚ HTTP": {
+      "main": [
+        [
+          {
+            "node": "🗺️ RÚIAN Parcely HTTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏞️ Pozemkový Analytik v6": {
+      "main": [
+        [
+          {
+            "node": "📊 Výstupní Parser",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏠 Sreality Fáze 1": {
+      "main": [
+        [
+          {
+            "node": "💰 Cenový Pre-Filtr",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏠 Next Lista": {
+      "main": [
+        [
+          {
+            "node": "🔄 Sreality Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⏰ Denní": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Konfigurace",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📋 Formulář": {
+      "main": [
+        [
+          {
+            "node": "⚙️ Konfigurace",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "⚙️ Konfigurace": {
+      "main": [
+        [
+          {
+            "node": "🏠 Sreality URLs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏠 Sreality URLs": {
+      "main": [
+        [
+          {
+            "node": "🔄 Sreality Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔄 Sreality Loop": {
+      "main": [
+        [
+          {
+            "node": "📦 Hash Sběrač",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "🏠 Sreality HTTP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🏠 Sreality HTTP": {
+      "main": [
+        [
+          {
+            "node": "🏠 Sreality Fáze 1",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "💰 Cenový Pre-Filtr": {
+      "main": [
+        [
+          {
+            "node": "🏠 Next Lista",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini 2.5 Flash": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "🏞️ Pozemkový Analytik v6",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📊 Výstupní Parser": {
+      "main": [
+        [
+          {
+            "node": "📝 Zapsat Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "➡️ Next Pozemek": {
+      "main": [
+        [
+          {
+            "node": "🔄 Pozemek Loop",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🔄 Pozemek Loop": {
+      "main": [
+        [
+          {
+            "node": "✅ Hotovo",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "🏞️ Pozemkový Analytik v6",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "❓ Jsou pozemky?": {
+      "main": [
+        [
+          {
+            "node": "🔄 Pozemek Loop",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "📭 Žádné k analýze",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📦 Hash Sběrač": {
+      "main": [
+        [
+          {
+            "node": "📦 Filtr + Dedup",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📊 Načíst Sheet": {
+      "main": [
+        [
+          {
+            "node": "🆕 Najít Nové",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "🆕 Najít Nové": {
+      "main": [
+        [
+          {
+            "node": "❓ Jsou nové?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "❓ Jsou nové?": {
+      "main": [
+        [
+          {
+            "node": "🔄 Sreality Detail Loop",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "📭 Žádné nové",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📝 Zapsat Sheet": {
+      "main": [
+        [
+          {
+            "node": "➡️ Next Pozemek",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "📦 Filtr + Dedup": {
+      "main": [
+        [
+          {
+            "node": "📊 Načíst Sheet",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "availableInMCP": false
+  },
+  "versionId": "788ef79a-40c1-41ac-87d6-a0d7a07a74a1",
+  "meta": {
+    "instanceId": "8e34adb2300e52401f1c93ba0ab7517532d8d52d13b15ba3aac6a6f9125919c4"
+  },
+  "id": "lqt1iCX6EMmtWwqm",
+  "tags": []
+}
